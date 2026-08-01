@@ -53,6 +53,20 @@ export async function archiveProject(id: string, actor: TaskActor) {
   });
 }
 
+export async function restoreProject(id: string, actor: TaskActor) {
+  return db.$transaction(async (tx) => {
+    const project = await tx.project.update({ where: { id }, data: { archivedAt: null, status: "ACTIVE" } });
+    await tx.activity.create({
+      data: {
+        workspaceId: project.workspaceId, projectId: project.id,
+        actorType: actor.type, actorLabel: actor.label,
+        action: "project.restored", summary: `Restored project filter: ${project.key} · ${project.name}`
+      }
+    });
+    return project;
+  });
+}
+
 export async function deleteEmptyProject(id: string, actor: TaskActor) {
   return db.$transaction(async (tx) => {
     const project = await tx.project.findUniqueOrThrow({ where: { id } });

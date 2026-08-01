@@ -499,7 +499,7 @@ export default function Workspace({ initialWorkspace }: { initialWorkspace: Work
     {section !== "manage" && <section className="filterBar" aria-label="Task controls">
       <label className="searchBox"><span>⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search work, type, or project" /></label>
       {section === "work" && <label>Status<select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}><option value="ALL">All statuses</option>{stages.map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label>}
-      <label>Project<select value={projectFilter} onChange={(event) => setProjectFilter(event.target.value)}><option value="ALL">All projects</option><option value="UNSORTED">Unsorted</option>{projects.map((project) => <option value={project.id} key={project.id}>{project.key}</option>)}</select></label>
+      <label>Project<select value={projectFilter} onChange={(event) => setProjectFilter(event.target.value)}><option value="ALL">All projects</option><option value="UNSORTED">Unsorted</option>{activeProjects.map((project) => <option value={project.id} key={project.id}>{project.key}</option>)}</select></label>
       <label>Tag<select value={tagFilter} onChange={(event) => setTagFilter(event.target.value)}><option value="ALL">All tags</option>{tags.map((tag) => <option value={tag.id} key={tag.id}>{tag.name}</option>)}</select></label>
       {section === "work" ? <>
         <label>Group<select value={primaryGroup} onChange={(event) => setPrimaryGroup(event.target.value as GroupKey)}><option value="status">Status</option><option value="classification">Tag</option><option value="project">Project</option><option value="none">None</option></select></label>
@@ -561,8 +561,10 @@ export default function Workspace({ initialWorkspace }: { initialWorkspace: Work
             <input name="key" defaultValue={project.key} maxLength={12} required />
             <input name="name" defaultValue={project.name} maxLength={100} required />
             <input name="color" type="color" defaultValue={project.color ?? "#768075"} aria-label={`${project.name} color`} />
+            <span className="managerState">{project.archivedAt ? "Archived" : "Active"}</span>
             <button disabled={busy}>Save</button>
             {!project.archivedAt && <button type="button" className="quietDanger" disabled={busy} onClick={() => void mutate(`/api/projects/${project.id}`, "POST", { action: "archive" })}>Archive</button>}
+            {project.archivedAt && <button type="button" className="restoreAction" disabled={busy} onClick={() => void mutate(`/api/projects/${project.id}`, "POST", { action: "restore" })}>Restore</button>}
             <button type="button" className="quietDanger" disabled={busy} onClick={() => void mutate(`/api/projects/${project.id}`, "POST", { action: "delete" })}>Delete empty</button>
           </form>)}</div>
         </section>
@@ -651,7 +653,7 @@ export default function Workspace({ initialWorkspace }: { initialWorkspace: Work
           <form onSubmit={creating ? createTask : saveTask}>
             <label>Title<input name="title" required maxLength={200} defaultValue={selected?.title} data-dialog-initial-focus /></label>
             <label>Details <span className="fieldHint">Markdown supported</span><textarea name="description" maxLength={20000} rows={6} defaultValue={selected?.description ?? ""} placeholder="Use headings, lists, links, tables, or checkboxes to structure the work…" /></label>
-            <div className="formRow"><label>Project<select name="projectId" defaultValue={selected?.project?.id ?? activeProjects[0]?.id ?? ""}><option value="">Unsorted</option>{activeProjects.map((project) => <option key={project.id} value={project.id}>{project.key} · {project.name}</option>)}{selected?.project && !activeProjects.some((project) => project.id === selected.project!.id) && <option value={selected.project.id}>{selected.project.key} · archived project</option>}</select></label>
+            <div className="formRow"><label>Project<select name="projectId" defaultValue={creating ? activeProjects[0]?.id ?? "" : selected?.project?.id ?? ""}><option value="">Unsorted</option>{activeProjects.map((project) => <option key={project.id} value={project.id}>{project.key} · {project.name}</option>)}{selected?.project && !activeProjects.some((project) => project.id === selected.project!.id) && <option value={selected.project.id}>{selected.project.key} · archived project</option>}</select></label>
             <label>Priority<select name="priority" defaultValue={selected?.priority ?? "MEDIUM"}><option>LOW</option><option>MEDIUM</option><option>HIGH</option><option>URGENT</option></select></label></div>
             <fieldset className="tagPicker"><legend>Tags</legend><div>{tags.map((tag) => <label key={tag.id} style={{ "--tag": tag.color ?? "#718266" } as React.CSSProperties}><input type="checkbox" name="tagIds" value={tag.id} defaultChecked={selected?.tags.some(({ tag: current }) => current.id === tag.id)} /><span>{tag.name}</span></label>)}</div></fieldset>
             {selected && <label>Stage<select name="status" defaultValue={selected.status}>{stages.map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label>}
