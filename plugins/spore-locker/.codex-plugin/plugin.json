@@ -1,14 +1,14 @@
 {
   "name": "spore-locker",
-  "version": "0.2.0",
-  "description": "Local-first shared task lifecycle with an interactive MCP Apps card.",
+  "version": "0.4.0",
+  "description": "Local-first advisory task context with an interactive MCP Apps card.",
   "author": {
     "name": "Local developer"
   },
   "interface": {
     "displayName": "Spore Locker",
     "shortDescription": "Shared local tasks in chat",
-    "longDescription": "Capture, execute, approve, archive, and recover local tasks from an interactive card beside the conversation. Human approval remains explicit and all changes retain an actor-aware activity trail.",
+    "longDescription": "Capture, organize, retrieve, and hand off local task context beside the conversation. Completion reports remain pending human review, MCP cannot approve them, and all changes retain an actor-aware activity trail.",
     "developerName": "Local developer",
     "category": "Productivity",
     "capabilities": ["Interactive", "Read", "Write"],

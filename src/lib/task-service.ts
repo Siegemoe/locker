@@ -112,6 +112,54 @@ export async function updateTask(
   });
 }
 
+export async function submitTaskCompletion(
+  id: string,
+  version: number,
+  input: { summary: string; checks?: string[]; unresolved?: string[] },
+  actor: TaskActor
+) {
+  return db.$transaction(async (tx) => {
+    const current = await tx.task.findUniqueOrThrow({ where: { id } });
+    if (current.archivedAt) throw new Error("Restore this task before submitting completion");
+    if (current.version !== version) throw new Error("Task changed since it was loaded");
+
+    const checks = input.checks ?? [];
+    const unresolved = input.unresolved ?? [];
+    const report = [
+      "# Completion handoff",
+      "",
+      input.summary.trim(),
+      ...(checks.length ? ["", "## Checks performed", ...checks.map((item) => `- ${item.trim()}`)] : []),
+      ...(unresolved.length ? ["", "## Unresolved or follow-up", ...unresolved.map((item) => `- ${item.trim()}`)] : [])
+    ].join("\n");
+    const updated = await tx.task.updateMany({
+      where: { id, version, archivedAt: null },
+      data: {
+        status: "DONE", completedAt: new Date(), approvedAt: null, approvedBy: null,
+        version: { increment: 1 }
+      }
+    });
+    if (updated.count !== 1) throw new Error("Task changed since it was loaded");
+    const task = await tx.task.findUniqueOrThrow({ where: { id } });
+    const artifact = await tx.artifact.create({
+      data: {
+        workspaceId: task.workspaceId, taskId: task.id, kind: "TEXT",
+        title: "Completion handoff", textContent: report, createdBy: actor.label
+      }
+    });
+    await tx.activity.create({
+      data: {
+        workspaceId: task.workspaceId, projectId: task.projectId, taskId: task.id,
+        artifactId: artifact.id, actorType: actor.type, actorLabel: actor.label,
+        action: "task.completion_submitted",
+        summary: `Submitted completion for human review: ${task.title}`,
+        metadata: { summary: input.summary, checks, unresolved, artifactId: artifact.id, version: task.version }
+      }
+    });
+    return task;
+  });
+}
+
 async function lifecycleEvent(
   id: string,
   version: number,

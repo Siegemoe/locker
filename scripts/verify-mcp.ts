@@ -7,6 +7,10 @@ import { db } from "../src/lib/db";
 
 type Task = { id: string; title: string; status: string; version: number; approvedAt: string | null; tags: { id: string; name: string }[]; artifacts: { id: string; kind: string; title: string }[] };
 type Board = { tasks: Task[]; archived: boolean; tags: { id: string; name: string }[] };
+type Activity = { action: string; actorType: string; task: { id: string; title: string } | null };
+type TaskContext = { task: Task; activity: Activity[] };
+type Structure = { projects: { id: string; archivedAt: string | null; taskCount: number }[]; tags: { id: string; archivedAt: string | null; taskCount: number }[] };
+type ActivityList = { activity: Activity[]; limit: number; truncated: boolean };
 
 const tsxCli = fileURLToPath(new URL("../node_modules/tsx/dist/cli.mjs", import.meta.url));
 const serverFile = fileURLToPath(new URL("../src/mcp/server.ts", import.meta.url));
@@ -19,18 +23,23 @@ const transport = process.env.MCP_URL
       stderr: "pipe"
     });
 const client = new Client({ name: "spore-locker-verifier", version: "0.1.0" });
+let verificationTaskId: string | undefined;
 
-async function call(name: string, args: Record<string, unknown> = {}) {
+async function call<T>(name: string, args: Record<string, unknown> = {}) {
   const response = await client.callTool({ name, arguments: args });
   assert(!response.isError, JSON.stringify(response));
-  return response.structuredContent as Board;
+  return response.structuredContent as T;
 }
 
 async function main() {
   await client.connect(transport);
   const tools = await client.listTools();
-  assert(tools.tools.some((tool) => tool.name === "open_spore_locker"));
-  assert(tools.tools.some((tool) => tool.name === "approve_spore_task" && tool._meta?.ui));
+  const names = new Set(tools.tools.map((tool) => tool.name));
+  for (const name of [
+    "open_spore_locker", "get_spore_task_context", "list_spore_workspace_structure",
+    "submit_spore_completion", "attach_spore_workspace_reference", "list_spore_activity"
+  ]) assert(names.has(name), `Missing MCP tool: ${name}`);
+  assert(!names.has("approve_spore_task"), "Unauthenticated MCP must not expose human approval");
 
   const resources = await client.listResources();
   const card = resources.resources.find((resource) => resource.uri === "ui://spore-locker/task-context-v3.html");
@@ -45,41 +54,63 @@ async function main() {
   assert("text" in html && html.text.includes('id="reset"'));
   assert("text" in html && html.text.includes('a.rel="noopener noreferrer"'));
   assert("text" in html && html.text.includes('class="layout"'));
+  assert("text" in html && html.text.includes("Ready for human review"));
+  assert("text" in html && !html.text.includes("approve_spore_task"));
 
-  const initial = await call("open_spore_locker");
+  const initial = await call<Board>("open_spore_locker");
   assert.equal(initial.archived, false);
+  const structure = await call<Structure>("list_spore_workspace_structure", { includeArchived: true });
+  assert(structure.projects.every((item) => typeof item.taskCount === "number"));
+  assert(structure.tags.every((item) => typeof item.taskCount === "number"));
+  const recent = await call<ActivityList>("list_spore_activity", { limit: 5 });
+  assert.equal(recent.limit, 5);
+
+  if (process.env.MCP_URL) {
+    console.log(`Remote MCP verified read-only: ${tools.tools.length} tools, card resource, structure, and activity.`);
+    return;
+  }
+
   const tag = initial.tags[0];
-  let board = await call("capture_spore_task", { title: "MCP card verification item", priority: "HIGH", tagIds: tag ? [tag.id] : [] });
-  let task = board.tasks.find((item) => item.title === "MCP card verification item");
+  let board = await call<Board>("capture_spore_task", { title: "MCP advisory verification item", priority: "HIGH", tagIds: tag ? [tag.id] : [] });
+  let task = board.tasks.find((item) => item.title === "MCP advisory verification item");
   assert(task);
+  verificationTaskId = task.id;
   if (tag) assert(task.tags.some((item) => item.id === tag.id));
-  board = await call("attach_spore_context", { taskId: task.id, kind: "LINK", title: "Verification context", url: "https://excalidraw.com/" });
+  board = await call<Board>("attach_spore_context", { taskId: task.id, kind: "LINK", title: "Verification context", url: "https://excalidraw.com/" });
   task = board.tasks.find((item) => item.id === task!.id);
   assert(task);
   assert(task.artifacts.some((artifact) => artifact.title === "Verification context"));
-  board = await call("update_spore_task", { id: task.id, version: task.version, status: "DONE" });
-  task = board.tasks.find((item) => item.id === task!.id);
-  assert.equal(task?.status, "DONE");
-  board = await call("approve_spore_task", { id: task!.id, version: task!.version });
-  task = board.tasks.find((item) => item.id === task!.id);
-  assert(task?.approvedAt);
-  await call("archive_spore_task", { id: task!.id, version: task!.version });
-  const archived = await call("list_spore_tasks", { archived: true });
-  assert(archived.tasks.some((item) => item.id === task!.id));
 
-  if (!process.env.MCP_URL) {
-    const stored = await db.task.findUniqueOrThrow({
-      where: { id: task!.id }, include: { activities: { orderBy: { createdAt: "asc" } } }
-    });
-    assert.deepEqual(stored.activities.map((event) => [event.action, event.actorType]), [
-      ["task.created", "AI_TOOL"], ["artifact.created", "AI_TOOL"], ["task.updated", "AI_TOOL"],
-      ["task.approved", "USER"], ["task.archived", "AI_TOOL"]
-    ]);
-  }
-  console.log(`MCP verified: ${tools.tools.length} tools, explicit tags, artifact context, inline card resource, and actor-safe approval.`);
+  let context = await call<TaskContext>("attach_spore_workspace_reference", {
+    taskId: task.id, title: "Implementation plan", workspace: "spore-locker",
+    relativePath: "docs/plans/advisory-mcp.md", revision: "main", note: "Portable reference only"
+  });
+  assert(context.task.artifacts.some((artifact) => artifact.title === "Implementation plan" && artifact.kind === "TEXT"));
+
+  context = await call<TaskContext>("submit_spore_completion", {
+    id: context.task.id, version: context.task.version, summary: "Verified the advisory handoff path.",
+    checks: ["MCP resource and structured output validated"], unresolved: ["Human review remains external to MCP"]
+  });
+  assert.equal(context.task.status, "DONE");
+  assert.equal(context.task.approvedAt, null);
+  assert(context.task.artifacts.some((artifact) => artifact.title === "Completion handoff"));
+  assert(context.activity.some((event) => event.action === "task.completion_submitted"));
+
+  const stored = await db.task.findUniqueOrThrow({
+    where: { id: context.task.id }, include: { activities: { orderBy: { createdAt: "asc" } } }
+  });
+  assert.deepEqual(stored.activities.map((event) => [event.action, event.actorType]), [
+    ["task.created", "AI_TOOL"], ["artifact.created", "AI_TOOL"],
+    ["artifact.created", "AI_TOOL"], ["task.completion_submitted", "AI_TOOL"]
+  ]);
+  console.log(`MCP verified: ${tools.tools.length} advisory tools, completion handoff, portable context, history, and no approval authority.`);
 }
 
 main().finally(async () => {
   await client.close();
+  if (verificationTaskId && !process.env.MCP_URL) {
+    await db.activity.deleteMany({ where: { taskId: verificationTaskId } });
+    await db.task.deleteMany({ where: { id: verificationTaskId } });
+  }
   await db.$disconnect();
 });

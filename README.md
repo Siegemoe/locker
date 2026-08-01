@@ -1,8 +1,9 @@
 # Spore Locker
 
-Spore Locker is a local-first task and project workspace designed to serve both
-an interactive desktop UI and permissioned AI tools through the same backend
-service layer.
+Spore Locker is a local-first advisory and information-sharing workspace for
+tasks, project context, artifacts, and durable history. It serves an interactive
+desktop UI and a detached MCP surface through the same backend service layer;
+it is not an agent runner, delegation system, or workflow runtime.
 
 ## What is included
 
@@ -12,7 +13,7 @@ service layer.
 - Managed projects, explicit multi-tags, task artifacts, immutable activities,
   and optimistic task-versioning
 - Actor-aware task service shared by UI and AI-facing HTTP endpoints
-- Local development identity boundary and bearer-token boundary for AI tools
+- Local development identity boundary and bearer-token boundary for HTTP API tools
 - Seed data for the first Spore Locker board
 
 ## Docker Desktop runtime
@@ -105,10 +106,20 @@ content validation, and retention behavior.
 
 ## MCP Apps plugin
 
-The personal plugin package under `plugins/spore-locker` registers eight tools
-and an MCP Apps inline UI card. Codex/ChatGPT desktop can launch the card beside
-the conversation while the local Compose stack is running. The responsive web
-surface remains a development preview, not the intended daily interface.
+The personal plugin package under `plugins/spore-locker` registers twelve tools
+and an MCP Apps inline UI card. The surface supports filtered task discovery,
+full task context, read-only project/tag structure, safe text/link/file metadata,
+portable workspace-relative references, filtered activity, and evidence-rich
+completion handoffs. Completion submission marks a task `DONE`, creates a durable
+handoff artifact, and leaves approval to the human-facing standalone Locker.
+The MCP never records human approval.
+
+This MCP is currently unauthenticated and should be treated as a local detached
+advisory tool. It may capture or organize information only when the user asks;
+it does not grant delegated authority, execute work, or act as a workflow
+runtime. Project and tag creation, renaming, and archival remain in the
+human-facing Locker; MCP can discover all structure and assign existing values
+to tasks.
 
 The local plugin connects to `http://127.0.0.1:8787/mcp`. A public HTTPS tunnel
 may be configured separately, but remote ChatGPT registration should wait for

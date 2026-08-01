@@ -157,6 +157,8 @@ export async function createArtifact(
 
 export async function archiveArtifact(id: string, actor: TaskActor) {
   return db.$transaction(async (tx) => {
+    const current = await tx.artifact.findUniqueOrThrow({ where: { id }, include: { task: true } });
+    if (current.archivedAt) throw new Error("Artifact is already removed from active context");
     const artifact = await tx.artifact.update({ where: { id }, data: { archivedAt: new Date() }, include: { task: true } });
     await tx.activity.create({
       data: {
@@ -174,7 +176,7 @@ export async function listActivity(
   workspaceId: string,
   filters: {
     projectId?: string; tagId?: string; actorType?: "USER" | "AI_TOOL" | "SYSTEM";
-    action?: string; taskId?: string; since?: Date;
+    action?: string; taskId?: string; since?: Date; limit?: number;
   }
 ) {
   return db.activity.findMany({
@@ -197,6 +199,6 @@ export async function listActivity(
       artifact: { select: { id: true, title: true, kind: true } }
     },
     orderBy: { createdAt: "desc" },
-    take: 500
+    take: Math.min(Math.max(filters.limit ?? 500, 1), 501)
   });
 }

@@ -6,6 +6,7 @@ type Activity = { action: string; actorType: string; actorLabel: string };
 type ApiTask = { id: string; title: string; status: string; version: number; approvedAt: string | null; activities: Activity[]; tags: { tag: { id: string; name: string } }[]; artifacts: { id: string; title: string; kind: string }[] };
 type McpTask = { id: string; title: string; status: string; version: number; approvedAt: string | null; tags: { id: string; name: string }[]; artifacts: { id: string; title: string; kind: string }[] };
 type Board = { tasks: McpTask[]; archived: boolean };
+type TaskContext = { task: McpTask; activity: Activity[] };
 type Project = { id: string; key: string; name: string };
 type Tag = { id: string; name: string };
 
@@ -19,10 +20,10 @@ async function api(path: string, options?: RequestInit) {
   return body.data;
 }
 
-async function tool(name: string, args: Record<string, unknown> = {}) {
+async function tool<T>(name: string, args: Record<string, unknown> = {}) {
   const response = await client.callTool({ name, arguments: args });
   assert(!response.isError, JSON.stringify(response));
-  return response.structuredContent as Board;
+  return response.structuredContent as T;
 }
 
 async function main() {
@@ -72,37 +73,44 @@ async function main() {
   }) as ApiTask;
 
   await client.connect(new StreamableHTTPClientTransport(new URL("http://127.0.0.1:8787/mcp")));
-  const opened = await tool("open_spore_locker");
+  const listedTools = await client.listTools();
+  assert(!listedTools.tools.some((item) => item.name === "approve_spore_task"));
+  const opened = await tool<Board>("open_spore_locker");
   let shared = opened.tasks.find((item) => item.id === task.id);
   assert(shared);
   assert(shared.tags.some((item) => item.id === tag.id));
   assert(shared.artifacts.some((item) => item.title === "Excalidraw verification"));
   assert(shared.artifacts.some((item) => item.title === "Specification metadata" && item.kind === "FILE_METADATA"));
-  let board = await tool("attach_spore_context", {
+  let board = await tool<Board>("attach_spore_context", {
     taskId: task.id, kind: "TEXT", title: "MCP execution note", textContent: "Shared Markdown context"
   });
   shared = board.tasks.find((item) => item.id === task.id);
   assert(shared?.artifacts.some((item) => item.title === "MCP execution note"));
-  board = await tool("update_spore_task", { id: task.id, version: task.version, status: "IN_PROGRESS" });
+  board = await tool<Board>("update_spore_task", { id: task.id, version: task.version, status: "IN_PROGRESS" });
   let mcpTask = board.tasks.find((item) => item.id === task.id);
   assert.equal(mcpTask?.status, "IN_PROGRESS");
-  board = await tool("update_spore_task", { id: task.id, version: mcpTask!.version, status: "DONE" });
-  mcpTask = board.tasks.find((item) => item.id === task.id);
+  const completion = await tool<TaskContext>("submit_spore_completion", {
+    id: task.id, version: mcpTask!.version, summary: "Verified shared advisory completion handoff.",
+    checks: ["App and MCP paths share state"], unresolved: ["Human review remains in the standalone Locker"]
+  });
+  mcpTask = completion.task;
   assert.equal(mcpTask?.status, "DONE");
+  assert.equal(mcpTask?.approvedAt, null);
+  assert(mcpTask.artifacts.some((item) => item.title === "Completion handoff"));
 
   task = await api(`/api/tasks/${task.id}`, {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ version: mcpTask!.version, action: "approve" })
   }) as ApiTask;
   assert(task.approvedAt);
-  await tool("archive_spore_task", { id: task.id, version: task.version });
+  await tool<Board>("archive_spore_task", { id: task.id, version: task.version });
   const active = await api(`/api/workspaces/${workspace.id}/tasks`) as ApiTask[];
   assert(!active.some((item) => item.id === task.id));
   const archived = await api(`/api/workspaces/${workspace.id}/tasks?archived=true`) as ApiTask[];
   const stored = archived.find((item) => item.id === task.id);
   assert(stored);
   assert.deepEqual(stored.activities.slice(0, 9).map((event) => [event.action, event.actorType]), [
-    ["task.archived", "AI_TOOL"], ["task.approved", "USER"], ["task.updated", "AI_TOOL"],
+    ["task.archived", "AI_TOOL"], ["task.approved", "USER"], ["task.completion_submitted", "AI_TOOL"],
     ["task.updated", "AI_TOOL"], ["artifact.created", "AI_TOOL"], ["task.updated", "USER"],
     ["artifact.created", "USER"], ["artifact.created", "USER"], ["task.created", "USER"]
   ]);
@@ -133,7 +141,7 @@ async function main() {
   assert.equal(artifactActivity.filter((event) => event.action === "artifact.created").length, 3);
   const deletedActivity = await api(`/api/workspaces/${workspace.id}/activity?action=project.deleted&days=7`) as Activity[];
   assert(deletedActivity.some((event) => event.action === "project.deleted"));
-  console.log("Compose flow verified: projects, tags, artifacts, filtered immutable activity, safe deletion, shared MCP data, approval, and archive.");
+  console.log("Compose flow verified: projects, tags, artifacts, filtered immutable activity, completion handoff, standalone human approval, and archive.");
 }
 
 main().finally(() => client.close());
