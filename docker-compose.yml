@@ -1,0 +1,127 @@
+name: spore-locker-isolated
+
+x-runtime: &runtime
+  build: .
+  image: spore-locker-isolated-runtime:local
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: spore_locker_local
+      POSTGRES_USER: spore_locker_owner
+      POSTGRES_PASSWORD: "${SPORE_DB_PASSWORD:?Set SPORE_DB_PASSWORD in .env.compose}"
+    volumes:
+      - spore_locker_postgres:/var/lib/postgresql/data
+    networks:
+      - spore_locker_private
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U spore_locker_owner -d spore_locker_local"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  setup:
+    <<: *runtime
+    restart: "no"
+    environment:
+      DATABASE_URL: "postgresql://spore_locker_owner:${SPORE_DB_PASSWORD}@postgres:5432/spore_locker_local?schema=public"
+    command: ["sh", "-c", "pnpm db:deploy && pnpm db:seed"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - spore_locker_private
+
+  app:
+    <<: *runtime
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: "postgresql://spore_locker_owner:${SPORE_DB_PASSWORD}@postgres:5432/spore_locker_local?schema=public"
+      AI_TOOL_TOKEN: ""
+      LOCAL_UI_ENABLED: "true"
+      ARTIFACT_STORAGE_ROOT: "/var/lib/spore-locker/artifacts"
+    command: ["pnpm", "start"]
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - spore_locker_artifacts:/var/lib/spore-locker/artifacts
+    depends_on:
+      setup:
+        condition: service_completed_successfully
+    networks:
+      - spore_locker_private
+      - spore_locker_host
+
+  mcp:
+    <<: *runtime
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: "postgresql://spore_locker_owner:${SPORE_DB_PASSWORD}@postgres:5432/spore_locker_local?schema=public"
+      MCP_PORT: "8787"
+      MCP_TRANSPORT: "http"
+    command: ["pnpm", "mcp:http"]
+    ports:
+      - "127.0.0.1:8787:8787"
+    depends_on:
+      setup:
+        condition: service_completed_successfully
+    networks:
+      - spore_locker_private
+      - spore_locker_host
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:8787/').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  tunnel:
+    image: cloudflare/cloudflared:2026.7.3
+    restart: unless-stopped
+    command: ["tunnel", "--config", "/etc/cloudflared/config.yml", "run"]
+    volumes:
+      - ./cloudflared/config.yml:/etc/cloudflared/config.yml:ro
+      - C:/Users/zghor/.cloudflared/1e593c8f-a7f0-4e17-b3b7-b3a0a8ed3143.json:/etc/cloudflared/credentials.json:ro
+    depends_on:
+      mcp:
+        condition: service_healthy
+    networks:
+      - spore_locker_host
+
+  tailscale:
+    image: tailscale/tailscale:v1.98.9
+    profiles: ["tailscale"]
+    hostname: spore-locker
+    restart: unless-stopped
+    environment:
+      TS_AUTHKEY: "${TS_AUTHKEY:-}"
+      TS_AUTH_ONCE: "true"
+      TS_STATE_DIR: "/var/lib/tailscale"
+      TS_SERVE_CONFIG: "/config/serve-config.json"
+      TS_USERSPACE: "true"
+      TS_ACCEPT_DNS: "false"
+      TS_EXTRA_ARGS: "--advertise-tags=tag:spore-locker"
+    volumes:
+      - spore_locker_tailscale_state:/var/lib/tailscale
+      - ./tailscale:/config:ro
+    depends_on:
+      app:
+        condition: service_started
+    networks:
+      - spore_locker_host
+
+volumes:
+  spore_locker_postgres:
+    name: spore_locker_isolated_pgdata_v1
+  spore_locker_artifacts:
+    name: spore_locker_isolated_artifacts_v1
+  spore_locker_tailscale_state:
+    name: spore_locker_isolated_tailscale_state_v1
+
+networks:
+  spore_locker_private:
+    name: spore_locker_isolated_private_v1
+    internal: true
+  spore_locker_host:
+    name: spore_locker_isolated_host_v1

@@ -1,0 +1,236 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum WorkspaceRole {
+  OWNER
+  MEMBER
+  VIEWER
+  AI_TOOL
+}
+
+enum ProjectStatus {
+  PLANNED
+  ACTIVE
+  PAUSED
+  COMPLETED
+  ARCHIVED
+}
+
+enum TaskStatus {
+  BACKLOG
+  READY
+  IN_PROGRESS
+  BLOCKED
+  DONE
+  CANCELED
+}
+
+enum TaskPriority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+enum ActivityActorType {
+  USER
+  AI_TOOL
+  SYSTEM
+}
+
+enum DependencyType {
+  BLOCKS
+  RELATES_TO
+  DUPLICATES
+}
+
+enum ArtifactKind {
+  LINK
+  TEXT
+  FILE_METADATA
+}
+
+model User {
+  id          String            @id @default(uuid()) @db.Uuid
+  externalId  String?           @unique
+  email       String?           @unique
+  displayName String
+  memberships WorkspaceMember[]
+  activities  Activity[]        @relation("ActivityUser")
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+}
+
+model Workspace {
+  id          String            @id @default(uuid()) @db.Uuid
+  slug        String            @unique
+  name        String
+  description String?
+  members     WorkspaceMember[]
+  projects    Project[]
+  tasks       Task[]
+  tags        Tag[]
+  artifacts   Artifact[]
+  activities  Activity[]
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+  archivedAt  DateTime?
+}
+
+model WorkspaceMember {
+  workspaceId String        @db.Uuid
+  userId      String        @db.Uuid
+  role        WorkspaceRole @default(MEMBER)
+  workspace   Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user        User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt   DateTime      @default(now())
+
+  @@id([workspaceId, userId])
+  @@index([userId])
+}
+
+model Project {
+  id          String        @id @default(uuid()) @db.Uuid
+  workspaceId String        @db.Uuid
+  workspace   Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  key         String
+  name        String
+  description String?
+  status      ProjectStatus @default(ACTIVE)
+  color       String?
+  tasks       Task[]
+  activities  Activity[]
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+  archivedAt  DateTime?
+
+  @@unique([workspaceId, key])
+  @@index([workspaceId, status])
+}
+
+model Task {
+  id              String           @id @default(uuid()) @db.Uuid
+  workspaceId     String           @db.Uuid
+  projectId       String?          @db.Uuid
+  workspace       Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  project         Project?         @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  title           String
+  description     String?
+  status          TaskStatus       @default(BACKLOG)
+  priority        TaskPriority     @default(MEDIUM)
+  position        Int              @default(0)
+  dueAt           DateTime?
+  completedAt     DateTime?
+  approvedAt      DateTime?
+  approvedBy      String?
+  createdBy       String?
+  version         Int              @default(1)
+  dependencies    TaskDependency[] @relation("DependentTask")
+  dependents      TaskDependency[] @relation("BlockingTask")
+  activities      Activity[]
+  tags            TaskTag[]
+  artifacts       Artifact[]
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+  archivedAt      DateTime?
+
+  @@index([workspaceId, status, position])
+  @@index([projectId, status, position])
+  @@index([dueAt])
+}
+
+model Tag {
+  id          String     @id @default(uuid()) @db.Uuid
+  workspaceId String     @db.Uuid
+  workspace   Workspace  @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  name        String
+  color       String?
+  tasks       TaskTag[]
+  activities  Activity[]
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+  archivedAt  DateTime?
+
+  @@unique([workspaceId, name])
+  @@index([workspaceId, archivedAt])
+}
+
+model TaskTag {
+  taskId    String   @db.Uuid
+  tagId     String   @db.Uuid
+  task      Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  tag       Tag      @relation(fields: [tagId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@id([taskId, tagId])
+  @@index([tagId])
+}
+
+model Artifact {
+  id          String       @id @default(uuid()) @db.Uuid
+  workspaceId String       @db.Uuid
+  taskId      String       @db.Uuid
+  workspace   Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  task        Task         @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  kind        ArtifactKind
+  title       String
+  url         String?
+  textContent String?
+  fileName    String?
+  mimeType    String?
+  sizeBytes   Int?
+  storageKey  String?
+  createdBy   String
+  activities  Activity[]
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+  archivedAt  DateTime?
+
+  @@index([taskId, archivedAt])
+  @@index([workspaceId, createdAt(sort: Desc)])
+}
+
+model TaskDependency {
+  taskId       String         @db.Uuid
+  dependsOnId  String         @db.Uuid
+  type         DependencyType @default(BLOCKS)
+  task         Task           @relation("DependentTask", fields: [taskId], references: [id], onDelete: Cascade)
+  dependsOn    Task           @relation("BlockingTask", fields: [dependsOnId], references: [id], onDelete: Cascade)
+  createdAt    DateTime       @default(now())
+
+  @@id([taskId, dependsOnId, type])
+  @@index([dependsOnId])
+}
+
+model Activity {
+  id          String            @id @default(uuid()) @db.Uuid
+  workspaceId String            @db.Uuid
+  projectId   String?           @db.Uuid
+  taskId      String?           @db.Uuid
+  actorUserId String?           @db.Uuid
+  tagId       String?           @db.Uuid
+  artifactId  String?           @db.Uuid
+  actorType   ActivityActorType
+  actorLabel  String
+  action      String
+  summary     String
+  metadata    Json?
+  workspace   Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  project     Project?          @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  task        Task?             @relation(fields: [taskId], references: [id], onDelete: SetNull)
+  actorUser   User?             @relation("ActivityUser", fields: [actorUserId], references: [id], onDelete: SetNull)
+  tag         Tag?              @relation(fields: [tagId], references: [id], onDelete: SetNull)
+  artifact    Artifact?         @relation(fields: [artifactId], references: [id], onDelete: SetNull)
+  createdAt   DateTime          @default(now())
+
+  @@index([workspaceId, createdAt(sort: Desc)])
+  @@index([taskId, createdAt(sort: Desc)])
+  @@index([tagId, createdAt(sort: Desc)])
+  @@index([artifactId, createdAt(sort: Desc)])
+}
