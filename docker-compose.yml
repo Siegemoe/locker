@@ -78,6 +78,7 @@ services:
 
   tunnel:
     image: cloudflare/cloudflared:2026.7.3
+    profiles: ["public-mcp"]
     restart: unless-stopped
     command: ["tunnel", "--config", "/etc/cloudflared/config.yml", "run"]
     volumes:

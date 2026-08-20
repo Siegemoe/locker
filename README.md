@@ -1,9 +1,10 @@
 # Spore Locker
 
-Spore Locker is a local-first advisory and information-sharing workspace for
-tasks, project context, artifacts, and durable history. It serves an interactive
-desktop UI and a detached MCP surface through the same backend service layer;
-it is not an agent runner, delegation system, or workflow runtime.
+Spore Locker is a local-first planning and information-sharing workspace for
+tasks, project context, dependency plans, artifacts, and durable history. It
+serves an interactive desktop UI and an MCP surface through the same backend
+service layer. It gives an AI authority to make routine planning and lifecycle
+decisions; it is not itself an agent runner or code-execution runtime.
 
 ## What is included
 
@@ -11,7 +12,7 @@ it is not an agent runner, delegation system, or workflow runtime.
 - PostgreSQL 17 development service via Docker Compose
 - Prisma data model and checked-in initial migration
 - Managed projects, explicit multi-tags, task artifacts, immutable activities,
-  and optimistic task-versioning
+  dependency-aware work selection, and optimistic task-versioning
 - Actor-aware task service shared by UI and AI-facing HTTP endpoints
 - Local development identity boundary and bearer-token boundary for HTTP API tools
 - Seed data for the first Spore Locker board
@@ -76,15 +77,27 @@ pnpm verify:mcp
 - `GET /api/workspaces/:workspaceId/tasks`
 - `POST /api/workspaces/:workspaceId/tasks`
 - `PATCH /api/tasks/:taskId`
+- `PUT /api/tasks/:taskId/dependencies`
 - `POST /api/tasks/:taskId` with `{ "version": 3, "action": "approve" | "archive" | "restore" }`
 
 An AI client authenticates with `Authorization: Bearer <AI_TOOL_TOKEN>` and may
 set `X-Spore-Actor` to a human-readable tool name. All writes go through the
 same task service and emit immutable actor-labeled activity records. AI tools
-can capture, define, stage, execute, and complete work, but `approve` is rejected
-unless the caller is a human actor. Archive is only allowed after approval.
-Production exposure requires a
+can capture, define, stage, complete, approve, archive, and restore work. Archive
+remains a separate recoverable step after approval, keeping closure intentional
+without reserving the decision for a human. Production exposure requires a
 real session/identity provider plus workspace authorization checks.
+
+## Agent work queue and dependency planning
+
+`get_spore_work_queue` derives four useful planning views from the canonical
+task graph: priority-ranked actionable work, unblocked backlog candidates,
+blocked work with its dependency context, and completed work awaiting a
+lifecycle decision. `plan_spore_task_dependencies` replaces a task's explicit
+`BLOCKS`, `RELATES_TO`, and `DUPLICATES` edges using optimistic versioning.
+Cross-workspace references, archived targets, self-dependencies, duplicate
+edges, and blocking cycles are rejected. These are integrity constraints, not
+approval gates; the AI decides the plan and the activity stream records it.
 
 ## Projects, tags, activity, and context
 
@@ -106,21 +119,22 @@ content validation, and retention behavior.
 
 ## MCP Apps plugin
 
-The personal plugin package under `plugins/spore-locker` registers twelve tools
+The personal plugin package under `plugins/spore-locker` registers fifteen tools
 and an MCP Apps inline UI card. The surface supports filtered task discovery,
-full task context, read-only project/tag structure, safe text/link/file metadata,
-portable workspace-relative references, filtered activity, and evidence-rich
-completion handoffs. Completion submission marks a task `DONE`, creates a durable
-handoff artifact, and leaves approval to the human-facing standalone Locker.
-The MCP never records human approval.
+full task and dependency context, a derived agent work queue, read-only
+project/tag structure, safe text/link/file metadata, portable workspace-relative
+references, filtered activity, and evidence-rich completion handoffs. Completion
+submission marks a task `DONE` and creates a durable handoff artifact. Approval
+is a separate MCP action so the deciding actor remains explicit in history.
 
-This MCP is currently unauthenticated and should be treated as a local detached
-advisory tool. It may capture or organize information only when the user asks;
-it does not grant delegated authority, execute work, or act as a workflow
-runtime. Project and tag creation, renaming, and archival remain in the
-human-facing Locker; MCP can discover all structure and assign existing values
-to tasks.
+This MCP is currently unauthenticated and must remain local. The legacy
+Cloudflare tunnel is profile-gated as `public-mcp` and must remain stopped until
+OAuth 2.1 protected-resource discovery and per-request access-token validation
+are implemented. It grants delegated planning and task-lifecycle authority but
+does not itself execute code or act as a workflow runtime. Project and tag
+administration remains in the standalone Locker for this first PM slice; MCP
+can discover all structure and assign existing values to tasks.
 
-The local plugin connects to `http://127.0.0.1:8787/mcp`. A public HTTPS tunnel
-may be configured separately, but remote ChatGPT registration should wait for
-OAuth 2.1 protected-resource discovery and per-request access-token validation.
+The local plugin connects to `http://127.0.0.1:8787/mcp`. Do not enable the
+`public-mcp` profile for remote ChatGPT registration until that authentication
+boundary exists.

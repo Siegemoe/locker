@@ -1,4 +1,4 @@
-import type { ActivityActorType, TaskPriority, TaskStatus } from "@prisma/client";
+import type { ActivityActorType, DependencyType, TaskPriority, TaskStatus } from "@prisma/client";
 import { db } from "@/lib/db";
 
 export type TaskActor = { type: ActivityActorType; label: string };
@@ -10,9 +10,98 @@ export async function listTasks(workspaceId: string, projectId?: string, archive
       project: { select: { id: true, key: true, name: true } },
       tags: { include: { tag: true }, orderBy: { createdAt: "asc" } },
       artifacts: { where: { archivedAt: null }, orderBy: { createdAt: "desc" } },
+      dependencies: {
+        include: { dependsOn: { select: { id: true, title: true, status: true, archivedAt: true } } },
+        orderBy: { createdAt: "asc" }
+      },
+      dependents: {
+        include: { task: { select: { id: true, title: true, status: true, archivedAt: true } } },
+        orderBy: { createdAt: "asc" }
+      },
       activities: { orderBy: { createdAt: "desc" }, take: 30 }
     },
     orderBy: [{ status: "asc" }, { position: "asc" }, { createdAt: "desc" }]
+  });
+}
+
+export async function replaceTaskDependencies(
+  id: string,
+  version: number,
+  dependencies: { taskId: string; type: DependencyType }[],
+  actor: TaskActor
+) {
+  return db.$transaction(async (tx) => {
+    const current = await tx.task.findUniqueOrThrow({
+      where: { id },
+      include: { dependencies: { orderBy: { createdAt: "asc" } } }
+    });
+    if (current.archivedAt) throw new Error("Restore this task before changing its plan");
+    if (current.version !== version) throw new Error("Task changed since it was loaded");
+
+    const unique = new Map(dependencies.map((item) => [`${item.taskId}:${item.type}`, item]));
+    if (unique.size !== dependencies.length) throw new Error("Duplicate task dependencies are not allowed");
+    if (dependencies.some((item) => item.taskId === id)) throw new Error("A task cannot depend on itself");
+
+    const targetIds = [...new Set(dependencies.map((item) => item.taskId))];
+    const targets = targetIds.length
+      ? await tx.task.findMany({ where: { id: { in: targetIds }, workspaceId: current.workspaceId, archivedAt: null } })
+      : [];
+    if (targets.length !== targetIds.length) {
+      throw new Error("Dependencies must reference active tasks in the same workspace");
+    }
+
+    const blockingEdges = await tx.taskDependency.findMany({
+      where: { type: "BLOCKS", task: { workspaceId: current.workspaceId }, taskId: { not: id } },
+      select: { taskId: true, dependsOnId: true }
+    });
+    const adjacency = new Map<string, string[]>();
+    for (const edge of blockingEdges) {
+      adjacency.set(edge.taskId, [...(adjacency.get(edge.taskId) ?? []), edge.dependsOnId]);
+    }
+    for (const dependency of dependencies.filter((item) => item.type === "BLOCKS")) {
+      adjacency.set(id, [...(adjacency.get(id) ?? []), dependency.taskId]);
+    }
+    const reachesTask = (start: string) => {
+      const pending = [start];
+      const visited = new Set<string>();
+      while (pending.length) {
+        const taskId = pending.pop()!;
+        if (taskId === id) return true;
+        if (visited.has(taskId)) continue;
+        visited.add(taskId);
+        pending.push(...(adjacency.get(taskId) ?? []));
+      }
+      return false;
+    };
+    if (dependencies.some((item) => item.type === "BLOCKS" && reachesTask(item.taskId))) {
+      throw new Error("Blocking dependencies cannot create a cycle");
+    }
+
+    const updated = await tx.task.updateMany({
+      where: { id, version, archivedAt: null },
+      data: { version: { increment: 1 } }
+    });
+    if (updated.count !== 1) throw new Error("Task changed since it was loaded");
+    await tx.taskDependency.deleteMany({ where: { taskId: id } });
+    if (dependencies.length) {
+      await tx.taskDependency.createMany({
+        data: dependencies.map((item) => ({ taskId: id, dependsOnId: item.taskId, type: item.type }))
+      });
+    }
+    const task = await tx.task.findUniqueOrThrow({ where: { id } });
+    await tx.activity.create({
+      data: {
+        workspaceId: task.workspaceId,
+        projectId: task.projectId,
+        taskId: task.id,
+        actorType: actor.type,
+        actorLabel: actor.label,
+        action: "task.dependencies_replaced",
+        summary: `Updated dependency plan: ${task.title}`,
+        metadata: { before: current.dependencies, dependencies, version: task.version }
+      }
+    });
+    return task;
   });
 }
 
@@ -152,7 +241,7 @@ export async function submitTaskCompletion(
         workspaceId: task.workspaceId, projectId: task.projectId, taskId: task.id,
         artifactId: artifact.id, actorType: actor.type, actorLabel: actor.label,
         action: "task.completion_submitted",
-        summary: `Submitted completion for human review: ${task.title}`,
+        summary: `Recorded completion evidence: ${task.title}`,
         metadata: { summary: input.summary, checks, unresolved, artifactId: artifact.id, version: task.version }
       }
     });
@@ -169,9 +258,6 @@ async function lifecycleEvent(
   return db.$transaction(async (tx) => {
     const current = await tx.task.findUniqueOrThrow({ where: { id } });
     if (current.version !== version) throw new Error("Task changed since it was loaded");
-    if (action === "approve" && actor.type !== "USER") {
-      throw new Error("Only a human actor can approve completion");
-    }
     if (action === "approve" && (current.status !== "DONE" || current.archivedAt)) {
       throw new Error("Only a completed, active task can be approved");
     }

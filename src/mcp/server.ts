@@ -6,7 +6,8 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { db } from "../lib/db";
 import {
-  archiveTask, createTask, listTasks, restoreTask, submitTaskCompletion, updateTask
+  approveTask, archiveTask, createTask, listTasks, replaceTaskDependencies, restoreTask,
+  submitTaskCompletion, updateTask
 } from "../lib/task-service";
 import { createArtifact, listActivity } from "../lib/workspace-service";
 
@@ -22,13 +23,20 @@ const artifactSchema = z.object({
   url: z.string().nullable(), textContent: z.string().nullable(), fileName: z.string().nullable(),
   mimeType: z.string().nullable(), sizeBytes: z.number().nullable()
 });
+const relatedTaskSchema = z.object({
+  id: z.string(), title: z.string(), status: z.string(), archivedAt: z.string().nullable()
+});
+const dependencySchema = z.object({
+  type: z.enum(["BLOCKS", "RELATES_TO", "DUPLICATES"]), task: relatedTaskSchema, resolved: z.boolean()
+});
 const taskSchema = z.object({
   id: z.string(), title: z.string(), description: z.string().nullable(),
   status: z.string(), priority: z.string(), version: z.number(),
   completedAt: z.string().nullable(), approvedAt: z.string().nullable(),
   approvedBy: z.string().nullable(), archivedAt: z.string().nullable(),
   projectKey: z.string().nullable(), projectId: z.string().nullable(),
-  tags: z.array(tagSchema), artifacts: z.array(artifactSchema)
+  tags: z.array(tagSchema), artifacts: z.array(artifactSchema),
+  dependencies: z.array(dependencySchema), dependents: z.array(dependencySchema), actionable: z.boolean()
 });
 const boardSchema = {
   tasks: z.array(taskSchema), archived: z.boolean(),
@@ -55,12 +63,27 @@ const structureSchema = {
   projects: z.array(projectStructureSchema), tags: z.array(tagStructureSchema), includeArchived: z.boolean()
 };
 const activityListSchema = { activity: z.array(activitySchema), limit: z.number(), truncated: z.boolean() };
+const workQueueSchema = {
+  actionable: z.array(taskSchema), backlog: z.array(taskSchema), blocked: z.array(taskSchema),
+  review: z.array(taskSchema), counts: z.object({
+    actionable: z.number(), backlog: z.number(), blocked: z.number(), review: z.number(), total: z.number()
+  })
+};
 
 async function workspaceId() {
   return (await db.workspace.findUniqueOrThrow({ where: { slug: "spore-locker" } })).id;
 }
 
 function serialize(task: Awaited<ReturnType<typeof listTasks>>[number]) {
+  const dependencyResolved = (type: string, status: string) =>
+    type !== "BLOCKS" || status === "DONE" || status === "CANCELED";
+  const dependencies = task.dependencies.map(({ type, dependsOn }) => ({
+    type, task: {
+      id: dependsOn.id, title: dependsOn.title, status: dependsOn.status,
+      archivedAt: dependsOn.archivedAt?.toISOString() ?? null
+    },
+    resolved: dependencyResolved(type, dependsOn.status)
+  }));
   return {
     id: task.id, title: task.title, description: task.description, status: task.status,
     priority: task.priority, version: task.version,
@@ -73,7 +96,16 @@ function serialize(task: Awaited<ReturnType<typeof listTasks>>[number]) {
       id: artifact.id, kind: artifact.kind, title: artifact.title, url: artifact.url,
       textContent: artifact.textContent, fileName: artifact.fileName,
       mimeType: artifact.mimeType, sizeBytes: artifact.sizeBytes
-    }))
+    })),
+    dependencies,
+    dependents: task.dependents.map(({ type, task: dependent }) => ({
+      type, task: {
+        id: dependent.id, title: dependent.title, status: dependent.status,
+        archivedAt: dependent.archivedAt?.toISOString() ?? null
+      },
+      resolved: dependencyResolved(type, task.status)
+    })),
+    actionable: ["READY", "IN_PROGRESS"].includes(task.status) && dependencies.every((item) => item.resolved)
   };
 }
 
@@ -118,11 +150,46 @@ async function taskContext(taskId: string) {
       project: { select: { id: true, key: true, name: true } },
       tags: { include: { tag: true }, orderBy: { createdAt: "asc" } },
       artifacts: { where: { archivedAt: null }, orderBy: { createdAt: "desc" } },
+      dependencies: {
+        include: { dependsOn: { select: { id: true, title: true, status: true, archivedAt: true } } },
+        orderBy: { createdAt: "asc" }
+      },
+      dependents: {
+        include: { task: { select: { id: true, title: true, status: true, archivedAt: true } } },
+        orderBy: { createdAt: "asc" }
+      },
       activities: { orderBy: { createdAt: "desc" }, take: 100 }
     }
   });
   const activity = await listActivity(id, { taskId, limit: 100 });
   return { task: serialize(task), activity: activity.map(serializeActivity) };
+}
+
+async function workQueue(projectId?: string, limit = 25) {
+  const tasks = (await listTasks(await workspaceId(), projectId)).map(serialize);
+  const unresolved = (task: (typeof tasks)[number]) => task.dependencies.some((item) => !item.resolved);
+  const priority = { URGENT: 0, HIGH: 1, MEDIUM: 2, LOW: 3 } as const;
+  const ranked = [...tasks].sort((a, b) =>
+    priority[a.priority as keyof typeof priority] - priority[b.priority as keyof typeof priority] ||
+    a.title.localeCompare(b.title)
+  );
+  const select = (predicate: (task: (typeof tasks)[number]) => boolean) => ranked.filter(predicate).slice(0, limit);
+  const actionable = select((task) => task.actionable);
+  const backlog = select((task) => task.status === "BACKLOG" && !unresolved(task));
+  const blocked = select((task) =>
+    !["DONE", "CANCELED"].includes(task.status) && (task.status === "BLOCKED" || unresolved(task)));
+  const review = select((task) => task.status === "DONE" && !task.approvedAt);
+  return {
+    actionable, backlog, blocked, review,
+    counts: {
+      actionable: tasks.filter((task) => task.actionable).length,
+      backlog: tasks.filter((task) => task.status === "BACKLOG" && !unresolved(task)).length,
+      blocked: tasks.filter((task) =>
+        !["DONE", "CANCELED"].includes(task.status) && (task.status === "BLOCKED" || unresolved(task))).length,
+      review: tasks.filter((task) => task.status === "DONE" && !task.approvedAt).length,
+      total: tasks.length
+    }
+  };
 }
 
 async function workspaceStructure(includeArchived = true) {
@@ -154,13 +221,13 @@ async function workspaceStructure(includeArchived = true) {
 
 export function createSporeServer() {
 const server = new McpServer(
-  { name: "spore-locker", version: "0.4.0" },
+  { name: "spore-locker", version: "0.5.0" },
   {
     instructions:
-      "Spore Locker is a detached advisory and information-sharing workspace, not an agent runtime or delegated authority. " +
-      "Use it to capture, organize, retrieve, and hand off context when the user asks. The MCP endpoint is currently unauthenticated. " +
-      "Submitting completion marks a task DONE and preserves a handoff report for human review; it never approves completion. " +
-      "Only the human-facing standalone Locker may record approval. Never claim AI or MCP approval."
+      "Spore Locker is a local-first planning and context workspace for autonomous software work. " +
+      "Use the dependency-aware work queue to select useful work, keep task plans current, and record lifecycle decisions in the immutable activity trail. " +
+      "The AI may complete, approve, archive, and restore tasks when the evidence supports the decision; use optimistic versions and preserve completion handoffs. " +
+      "The MCP endpoint is currently local and unauthenticated, so do not expose it publicly without per-request authentication."
   }
 );
 
@@ -198,6 +265,19 @@ registerAppTool(server, "list_spore_tasks", {
   annotations: { readOnlyHint: true, openWorldHint: false, destructiveHint: false },
   _meta: { ui: { visibility: ["model", "app"] } }
 }, async (filters) => result(await board(filters), `Listed ${filters.archived ? "archived" : "active"} Spore Locker tasks.`));
+
+registerAppTool(server, "get_spore_work_queue", {
+  title: "Get the Spore Locker agent work queue",
+  description: "Returns priority-ranked actionable work, backlog candidates, blocked work with dependency context, and completed work awaiting a lifecycle decision.",
+  inputSchema: {
+    projectId: z.string().uuid().optional(),
+    limit: z.number().int().min(1).max(100).optional()
+  },
+  outputSchema: workQueueSchema,
+  annotations: { readOnlyHint: true, openWorldHint: false, destructiveHint: false },
+  _meta: { ui: { visibility: ["model"] } }
+}, async ({ projectId, limit = 25 }) =>
+  result(await workQueue(projectId, limit), "Loaded the dependency-aware Spore Locker work queue."));
 
 registerAppTool(server, "get_spore_task_context", {
   title: "Get complete Spore Locker task context",
@@ -255,9 +335,26 @@ registerAppTool(server, "update_spore_task", {
   return result(await board(), "Updated the Spore Locker task.");
 });
 
+registerAppTool(server, "plan_spore_task_dependencies", {
+  title: "Plan Spore Locker task dependencies",
+  description: "Replaces a task's dependency plan, rejects cross-workspace references and blocking cycles, and records the decision in activity history.",
+  inputSchema: {
+    id: z.string().uuid(), version: z.number().int().positive(),
+    dependencies: z.array(z.object({
+      taskId: z.string().uuid(), type: z.enum(["BLOCKS", "RELATES_TO", "DUPLICATES"])
+    })).max(100)
+  },
+  outputSchema: taskContextSchema,
+  annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: false },
+  _meta: { ui: { visibility: ["model"] } }
+}, async ({ id, version, dependencies }) => {
+  await replaceTaskDependencies(id, version, dependencies, aiActor);
+  return result(await taskContext(id), "Updated the task dependency plan.");
+});
+
 registerAppTool(server, "submit_spore_completion", {
-  title: "Submit Spore Locker completion for review",
-  description: "Marks a task DONE and attaches a durable completion handoff with checks and unresolved items. This never records approval.",
+  title: "Record Spore Locker completion",
+  description: "Marks a task DONE and attaches a durable completion handoff with checks and unresolved items. Approval remains a separate, explicit lifecycle decision.",
   inputSchema: {
     id: z.string().uuid(), version: z.number().int().positive(),
     summary: z.string().trim().min(1).max(10_000),
@@ -269,12 +366,24 @@ registerAppTool(server, "submit_spore_completion", {
   _meta: { ui: { visibility: ["model"] } }
 }, async ({ id, version, summary, checks, unresolved }) => {
   await submitTaskCompletion(id, version, { summary, checks, unresolved }, aiActor);
-  return result(await taskContext(id), "Submitted completion evidence for human review. No approval was recorded.");
+  return result(await taskContext(id), "Recorded completion evidence. No approval was recorded.");
+});
+
+registerAppTool(server, "approve_spore_task", {
+  title: "Approve a completed Spore Locker task",
+  description: "Approves a completed task when its handoff evidence supports closure. The actor and decision remain visible in immutable activity history.",
+  inputSchema: { id: z.string().uuid(), version: z.number().int().positive() },
+  outputSchema: taskContextSchema,
+  annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: false },
+  _meta: { ui: { visibility: ["model", "app"] } }
+}, async ({ id, version }) => {
+  await approveTask(id, version, aiActor);
+  return result(await taskContext(id), "Approved the completed Spore Locker task.");
 });
 
 registerAppTool(server, "archive_spore_task", {
   title: "Archive an approved Spore Locker task",
-  description: "Archives a human-approved task without deleting its data or activity history.",
+  description: "Archives an approved task without deleting its data or activity history.",
   inputSchema: { id: z.string().uuid(), version: z.number().int().positive() },
   outputSchema: boardSchema,
   annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: false },
@@ -351,7 +460,7 @@ registerAppTool(server, "attach_spore_workspace_reference", {
 
 registerAppTool(server, "list_spore_activity", {
   title: "List Spore Locker activity",
-  description: "Reads the append-only advisory history with optional task, project, tag, actor, action-family, and time filters.",
+  description: "Reads the append-only activity history with optional task, project, tag, actor, action-family, and time filters.",
   inputSchema: {
     projectId: z.string().uuid().optional(), tagId: z.string().uuid().optional(),
     actorType: z.enum(["USER", "AI_TOOL", "SYSTEM"]).optional(),

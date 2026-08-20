@@ -67,14 +67,14 @@ async function main() {
       mimeType: "application/pdf", sizeBytes: 4096
     })
   });
-  let task = await api(`/api/tasks/${created.id}`, {
+  const task = await api(`/api/tasks/${created.id}`, {
     method: "PATCH", headers: { "content-type": "application/json" },
     body: JSON.stringify({ version: created.version, status: "READY", description: "Human shaped this task in the local UI path" })
   }) as ApiTask;
 
   await client.connect(new StreamableHTTPClientTransport(new URL("http://127.0.0.1:8787/mcp")));
   const listedTools = await client.listTools();
-  assert(!listedTools.tools.some((item) => item.name === "approve_spore_task"));
+  assert(listedTools.tools.some((item) => item.name === "approve_spore_task"));
   const opened = await tool<Board>("open_spore_locker");
   let shared = opened.tasks.find((item) => item.id === task.id);
   assert(shared);
@@ -98,19 +98,19 @@ async function main() {
   assert.equal(mcpTask?.approvedAt, null);
   assert(mcpTask.artifacts.some((item) => item.title === "Completion handoff"));
 
-  task = await api(`/api/tasks/${task.id}`, {
-    method: "POST", headers: { "content-type": "application/json" },
-    body: JSON.stringify({ version: mcpTask!.version, action: "approve" })
-  }) as ApiTask;
-  assert(task.approvedAt);
-  await tool<Board>("archive_spore_task", { id: task.id, version: task.version });
+  const approval = await tool<TaskContext>("approve_spore_task", {
+    id: task.id, version: mcpTask!.version
+  });
+  mcpTask = approval.task;
+  assert(mcpTask.approvedAt);
+  await tool<Board>("archive_spore_task", { id: task.id, version: mcpTask.version });
   const active = await api(`/api/workspaces/${workspace.id}/tasks`) as ApiTask[];
   assert(!active.some((item) => item.id === task.id));
   const archived = await api(`/api/workspaces/${workspace.id}/tasks?archived=true`) as ApiTask[];
   const stored = archived.find((item) => item.id === task.id);
   assert(stored);
   assert.deepEqual(stored.activities.slice(0, 9).map((event) => [event.action, event.actorType]), [
-    ["task.archived", "AI_TOOL"], ["task.approved", "USER"], ["task.completion_submitted", "AI_TOOL"],
+    ["task.archived", "AI_TOOL"], ["task.approved", "AI_TOOL"], ["task.completion_submitted", "AI_TOOL"],
     ["task.updated", "AI_TOOL"], ["artifact.created", "AI_TOOL"], ["task.updated", "USER"],
     ["artifact.created", "USER"], ["artifact.created", "USER"], ["task.created", "USER"]
   ]);
@@ -141,7 +141,7 @@ async function main() {
   assert.equal(artifactActivity.filter((event) => event.action === "artifact.created").length, 3);
   const deletedActivity = await api(`/api/workspaces/${workspace.id}/activity?action=project.deleted&days=7`) as Activity[];
   assert(deletedActivity.some((event) => event.action === "project.deleted"));
-  console.log("Compose flow verified: projects, tags, artifacts, filtered immutable activity, completion handoff, standalone human approval, and archive.");
+  console.log("Compose flow verified: projects, tags, artifacts, filtered immutable activity, completion evidence, explicit AI approval, and archive.");
 }
 
 main().finally(() => client.close());
