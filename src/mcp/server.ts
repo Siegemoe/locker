@@ -10,6 +10,11 @@ import {
   submitTaskCompletion, updateTask
 } from "../lib/task-service";
 import { createArtifact, listActivity } from "../lib/workspace-service";
+import {
+  finalizeJournalEntry, flagJournalCandidate, getAgentReflections, getJournalEntry,
+  journalDateString, renderJournalMarkdown, searchJournal, upsertJournalContribution,
+  type JournalEntryWithContext
+} from "../lib/journal-service";
 
 const CARD_URI = "ui://spore-locker/task-context-v3.html";
 const cardHtml = readFileSync(fileURLToPath(new URL("./spore-card.html", import.meta.url)), "utf8");
@@ -17,6 +22,8 @@ const aiActor = { type: "AI_TOOL" as const, label: "Spore Locker MCP" };
 
 const statusSchema = z.enum(["BACKLOG", "READY", "IN_PROGRESS", "BLOCKED", "DONE", "CANCELED"]);
 const prioritySchema = z.enum(["LOW", "MEDIUM", "HIGH", "URGENT"]);
+const journalRoleSchema = z.enum(["REFLECTION", "USER_DECISION", "AGENT_OBSERVATION", "AGENT_HYPOTHESIS", "AGENT_RECOMMENDATION", "OBJECTIVE_ACTIVITY"]);
+const journalCandidateKindSchema = z.enum(["DECISION", "REALIZATION", "MILESTONE", "DIRECTION_CHANGE", "ABANDONED_ASSUMPTION", "IDEA", "DISAGREEMENT", "FAILURE", "CHANGE_OF_MIND", "COMPLETION", "EVIDENCE"]);
 const tagSchema = z.object({ id: z.string(), name: z.string(), color: z.string().nullable() });
 const artifactSchema = z.object({
   id: z.string(), kind: z.enum(["LINK", "TEXT", "FILE_METADATA"]), title: z.string(),
@@ -48,7 +55,10 @@ const activitySchema = z.object({
   createdAt: z.string(), project: z.object({ id: z.string(), key: z.string(), name: z.string() }).nullable(),
   task: z.object({ id: z.string(), title: z.string() }).nullable(),
   tag: z.object({ id: z.string(), name: z.string() }).nullable(),
-  artifact: z.object({ id: z.string(), title: z.string(), kind: z.string() }).nullable()
+  artifact: z.object({ id: z.string(), title: z.string(), kind: z.string() }).nullable(),
+  journalEntry: z.object({ id: z.string(), date: z.string(), title: z.string() }).nullable(),
+  journalContribution: z.object({ id: z.string(), authorLabel: z.string() }).nullable(),
+  journalCandidate: z.object({ id: z.string(), summary: z.string(), kind: z.string() }).nullable()
 });
 const taskContextSchema = { task: taskSchema, activity: z.array(activitySchema) };
 const projectStructureSchema = z.object({
@@ -69,6 +79,34 @@ const workQueueSchema = {
     actionable: z.number(), backlog: z.number(), blocked: z.number(), review: z.number(), total: z.number()
   })
 };
+const journalProjectSchema = z.object({ id: z.string(), key: z.string(), name: z.string() });
+const journalContributionSchema = z.object({
+  id: z.string(), authorKey: z.string(), authorLabel: z.string(), modelId: z.string().nullable(),
+  role: z.string(), bodyMarkdown: z.string(), topics: z.array(z.string()), importance: z.number(),
+  sourceReferences: z.json().nullable(), version: z.number(), projects: z.array(journalProjectSchema),
+  createdAt: z.string(), updatedAt: z.string()
+});
+const journalCandidateSchema = z.object({
+  id: z.string(), authorKey: z.string(), authorLabel: z.string(), modelId: z.string().nullable(),
+  kind: z.string(), summary: z.string(), contextMarkdown: z.string().nullable(), importance: z.number(),
+  sourceReferences: z.json().nullable(), consumedAt: z.string().nullable(), project: journalProjectSchema.nullable(),
+  createdAt: z.string()
+});
+const journalEntrySchema = z.object({
+  id: z.string(), date: z.string(), title: z.string(), subtitle: z.string().nullable(),
+  status: z.string(), version: z.number(), finalizedAt: z.string().nullable(), finalizedBy: z.string().nullable(),
+  contributions: z.array(journalContributionSchema), candidates: z.array(journalCandidateSchema),
+  markdown: z.string(), createdAt: z.string(), updatedAt: z.string()
+});
+const journalSearchSchema = z.object({
+  kind: z.enum(["CONTRIBUTION", "CANDIDATE"]), passageId: z.string(), entryId: z.string(),
+  date: z.string(), entryTitle: z.string(), authorKey: z.string(), authorLabel: z.string(),
+  modelId: z.string().nullable(), role: z.string(), passage: z.string(), importance: z.number(),
+  topics: z.array(z.string()), projectKeys: z.array(z.string()), rank: z.number()
+});
+const journalReflectionSchema = journalContributionSchema.extend({
+  entry: z.object({ id: z.string(), date: z.string(), title: z.string(), status: z.string() })
+});
 
 async function workspaceId() {
   return (await db.workspace.findUniqueOrThrow({ where: { slug: "spore-locker" } })).id;
@@ -138,8 +176,68 @@ function serializeActivity(event: Awaited<ReturnType<typeof listActivity>>[numbe
   return {
     id: event.id, action: event.action, summary: event.summary, actorType: event.actorType,
     actorLabel: event.actorLabel, createdAt: event.createdAt.toISOString(),
-    project: event.project, task: event.task, tag: event.tag, artifact: event.artifact
+    project: event.project, task: event.task, tag: event.tag, artifact: event.artifact,
+    journalEntry: event.journalEntry ? {
+      id: event.journalEntry.id,
+      date: journalDateString(event.journalEntry.entryDate),
+      title: event.journalEntry.title
+    } : null,
+    journalContribution: event.journalContribution,
+    journalCandidate: event.journalCandidate
   };
+}
+
+function serializeJournalEntry(entry: JournalEntryWithContext) {
+  return {
+    id: entry.id,
+    date: journalDateString(entry.entryDate),
+    title: entry.title,
+    subtitle: entry.subtitle,
+    status: entry.status,
+    version: entry.version,
+    finalizedAt: entry.finalizedAt?.toISOString() ?? null,
+    finalizedBy: entry.finalizedBy,
+    contributions: entry.contributions.map((contribution) => ({
+      id: contribution.id,
+      authorKey: contribution.authorKey,
+      authorLabel: contribution.authorLabel,
+      modelId: contribution.modelId,
+      role: contribution.role,
+      bodyMarkdown: contribution.bodyMarkdown,
+      topics: contribution.topics,
+      importance: contribution.importance,
+      sourceReferences: contribution.sourceReferences,
+      version: contribution.version,
+      projects: contribution.projects.map(({ project }) => project),
+      createdAt: contribution.createdAt.toISOString(),
+      updatedAt: contribution.updatedAt.toISOString()
+    })),
+    candidates: entry.candidates.map((candidate) => ({
+      id: candidate.id,
+      authorKey: candidate.authorKey,
+      authorLabel: candidate.authorLabel,
+      modelId: candidate.modelId,
+      kind: candidate.kind,
+      summary: candidate.summary,
+      contextMarkdown: candidate.contextMarkdown,
+      importance: candidate.importance,
+      sourceReferences: candidate.sourceReferences,
+      consumedAt: candidate.consumedAt?.toISOString() ?? null,
+      project: candidate.project,
+      createdAt: candidate.createdAt.toISOString()
+    })),
+    markdown: renderJournalMarkdown(entry),
+    createdAt: entry.createdAt.toISOString(),
+    updatedAt: entry.updatedAt.toISOString()
+  };
+}
+
+function lockerToday() {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit"
+  }).formatToParts(new Date());
+  const value = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${value.year}-${value.month}-${value.day}`;
 }
 
 async function taskContext(taskId: string) {
@@ -221,11 +319,12 @@ async function workspaceStructure(includeArchived = true) {
 
 export function createSporeServer() {
 const server = new McpServer(
-  { name: "spore-locker", version: "0.5.0" },
+  { name: "spore-locker", version: "0.6.0" },
   {
     instructions:
       "Spore Locker is a local-first planning and context workspace for autonomous software work. " +
       "Use the dependency-aware work queue to select useful work, keep task plans current, and record lifecycle decisions in the immutable activity trail. " +
+      "Use the Journal to preserve attributed experience and interpretation across agents without turning it into a transcript log. " +
       "The AI may complete, approve, archive, and restore tasks when the evidence supports the decision; use optimistic versions and preserve completion handoffs. " +
       "The MCP endpoint is currently local and unauthenticated, so do not expose it publicly without per-request authentication."
   }
@@ -456,6 +555,139 @@ registerAppTool(server, "attach_spore_workspace_reference", {
   ].join("\n");
   await createArtifact({ taskId, kind: "TEXT", title, textContent }, aiActor);
   return result(await taskContext(taskId), "Attached the portable workspace reference without reading local files.");
+});
+
+registerAppTool(server, "get_spore_journal_entry", {
+  title: "Read a Spore Locker Journal entry",
+  description: "Reads one canonical daily Journal entry with attributed agent contributions, candidate events, provenance, and a deterministic Markdown rendering. Defaults to today in the Locker timezone.",
+  inputSchema: { date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional() },
+  outputSchema: { date: z.string(), entry: journalEntrySchema.nullable() },
+  annotations: { readOnlyHint: true, openWorldHint: false, destructiveHint: false },
+  _meta: { ui: { visibility: ["model"] } }
+}, async ({ date = lockerToday() }) => {
+  const entry = await getJournalEntry(await workspaceId(), date);
+  return result({ date, entry: entry ? serializeJournalEntry(entry) : null }, entry ? `Loaded the ${date} Journal.` : `No Journal entry exists for ${date}.`);
+});
+
+registerAppTool(server, "upsert_spore_journal_contribution", {
+  title: "Write an attributed Journal contribution",
+  description: "Creates or updates the calling agent's attributed section in a daily Journal. Updates require the current contribution version; finalized days remain immutable.",
+  inputSchema: {
+    date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+    authorKey: z.string().trim().min(1).max(80).regex(/^[a-z0-9][a-z0-9._-]*$/i),
+    authorLabel: z.string().trim().min(1).max(120),
+    modelId: z.string().trim().max(160).nullable().optional(),
+    role: journalRoleSchema.optional(),
+    bodyMarkdown: z.string().trim().min(1).max(100_000),
+    topics: z.array(z.string().trim().min(1).max(80)).max(50).optional(),
+    importance: z.number().int().min(1).max(5).optional(),
+    sourceReferences: z.array(z.string().trim().min(1).max(2_000)).max(50).optional(),
+    projectIds: z.array(z.string().uuid()).max(50).optional(),
+    candidateIds: z.array(z.string().uuid()).max(100).optional(),
+    version: z.number().int().positive().optional()
+  },
+  outputSchema: { entry: journalEntrySchema },
+  annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: false },
+  _meta: { ui: { visibility: ["model"] } }
+}, async ({ date = lockerToday(), ...input }) => {
+  const entry = await upsertJournalContribution({ workspaceId: await workspaceId(), date, ...input }, aiActor);
+  return result({ entry: serializeJournalEntry(entry) }, `Saved ${input.authorLabel}'s attributed Journal contribution for ${date}.`);
+});
+
+registerAppTool(server, "flag_spore_journal_candidate", {
+  title: "Flag an important Journal event",
+  description: "Captures a lightweight, attributed event for later daily reflection without recording the full interaction transcript.",
+  inputSchema: {
+    date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+    authorKey: z.string().trim().min(1).max(80).regex(/^[a-z0-9][a-z0-9._-]*$/i),
+    authorLabel: z.string().trim().min(1).max(120),
+    modelId: z.string().trim().max(160).nullable().optional(),
+    kind: journalCandidateKindSchema,
+    summary: z.string().trim().min(1).max(2_000),
+    contextMarkdown: z.string().trim().max(20_000).nullable().optional(),
+    importance: z.number().int().min(1).max(5).optional(),
+    sourceReferences: z.array(z.string().trim().min(1).max(2_000)).max(50).optional(),
+    projectId: z.string().uuid().nullable().optional()
+  },
+  outputSchema: { entry: journalEntrySchema },
+  annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: false },
+  _meta: { ui: { visibility: ["model"] } }
+}, async ({ date = lockerToday(), ...input }) => {
+  const entry = await flagJournalCandidate({ workspaceId: await workspaceId(), date, ...input }, aiActor);
+  return result({ entry: serializeJournalEntry(entry) }, `Flagged an attributed ${input.kind.toLowerCase().replaceAll("_", " ")} for the ${date} Journal.`);
+});
+
+registerAppTool(server, "search_spore_journal", {
+  title: "Search the Spore Locker Journal",
+  description: "Runs PostgreSQL full-text search across original Journal contributions and candidate passages with date, author, project, and importance filters.",
+  inputSchema: {
+    query: z.string().trim().min(1).max(500),
+    dateFrom: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+    dateTo: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+    authorKey: z.string().trim().max(80).optional(),
+    topic: z.string().trim().max(80).optional(),
+    projectId: z.string().uuid().optional(),
+    minImportance: z.number().int().min(1).max(5).optional(),
+    limit: z.number().int().min(1).max(100).optional()
+  },
+  outputSchema: { results: z.array(journalSearchSchema) },
+  annotations: { readOnlyHint: true, openWorldHint: false, destructiveHint: false },
+  _meta: { ui: { visibility: ["model"] } }
+}, async (input) => {
+  const matches = await searchJournal(await workspaceId(), input);
+  const results = matches.map(({ entryDate, ...match }) => ({
+    ...match, date: journalDateString(entryDate)
+  }));
+  return result({ results }, `Found ${results.length} original Journal passages.`);
+});
+
+registerAppTool(server, "get_spore_agent_reflections", {
+  title: "Read an agent's earlier Journal reflections",
+  description: "Returns prior attributed contributions for one stable agent identity so the agent can revisit, revise, or challenge earlier conclusions in a new dated entry.",
+  inputSchema: {
+    authorKey: z.string().trim().min(1).max(80),
+    before: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+    limit: z.number().int().min(1).max(100).optional()
+  },
+  outputSchema: { reflections: z.array(journalReflectionSchema) },
+  annotations: { readOnlyHint: true, openWorldHint: false, destructiveHint: false },
+  _meta: { ui: { visibility: ["model"] } }
+}, async ({ authorKey, before, limit }) => {
+  const contributions = await getAgentReflections(await workspaceId(), authorKey, { before, limit });
+  const reflections = contributions.map((contribution) => ({
+    id: contribution.id,
+    authorKey: contribution.authorKey,
+    authorLabel: contribution.authorLabel,
+    modelId: contribution.modelId,
+    role: contribution.role,
+    bodyMarkdown: contribution.bodyMarkdown,
+    topics: contribution.topics,
+    importance: contribution.importance,
+    sourceReferences: contribution.sourceReferences,
+    version: contribution.version,
+    projects: contribution.projects.map(({ project }) => project),
+    createdAt: contribution.createdAt.toISOString(),
+    updatedAt: contribution.updatedAt.toISOString(),
+    entry: {
+      id: contribution.entry.id,
+      date: journalDateString(contribution.entry.entryDate),
+      title: contribution.entry.title,
+      status: contribution.entry.status
+    }
+  }));
+  return result({ reflections }, `Loaded ${reflections.length} prior reflections for ${authorKey}.`);
+});
+
+registerAppTool(server, "finalize_spore_journal_entry", {
+  title: "Finalize a daily Journal entry",
+  description: "Closes an open daily Journal entry using optimistic versioning. Finalized contributions remain immutable; later reinterpretation belongs in a new dated entry.",
+  inputSchema: { id: z.string().uuid(), version: z.number().int().positive() },
+  outputSchema: { entry: journalEntrySchema },
+  annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: false },
+  _meta: { ui: { visibility: ["model"] } }
+}, async ({ id, version }) => {
+  const entry = await finalizeJournalEntry(id, version, aiActor);
+  return result({ entry: serializeJournalEntry(entry) }, `Finalized the ${journalDateString(entry.entryDate)} Journal entry.`);
 });
 
 registerAppTool(server, "list_spore_activity", {

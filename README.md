@@ -13,7 +13,9 @@ decisions; it is not itself an agent runner or code-execution runtime.
 - Prisma data model and checked-in initial migration
 - Managed projects, explicit multi-tags, task artifacts, immutable activities,
   dependency-aware work selection, and optimistic task-versioning
-- Actor-aware task service shared by UI and AI-facing HTTP endpoints
+- PostgreSQL-backed multi-agent Journal with attributed Markdown contributions,
+  revision history, candidate events, filtering, and full-text search
+- Actor-aware task and Journal services shared by UI, HTTP, CLI, and MCP adapters
 - Local development identity boundary and bearer-token boundary for HTTP API tools
 - Seed data for the first Spore Locker board
 
@@ -70,6 +72,8 @@ pnpm check
 pnpm build
 pnpm verify:lifecycle
 pnpm verify:mcp
+pnpm verify:journal
+pnpm journal today
 ```
 
 ## Lifecycle API boundary
@@ -99,6 +103,30 @@ Cross-workspace references, archived targets, self-dependencies, duplicate
 edges, and blocking cycles are rejected. These are integrity constraints, not
 approval gates; the AI decides the plan and the activity stream records it.
 
+## Multi-agent Journal
+
+The Journal is a bounded service inside Locker's modular application. It uses
+the same PostgreSQL database, Prisma client, transaction conventions, actor
+identity, activity trail, Compose lifecycle, and MCP server as task planning.
+It is not a second deployable or datastore.
+
+Each workspace has at most one `JournalEntry` per date. ChatGPT, Codex Desktop,
+Hermes, or another stable `authorKey` may each own one attributed Markdown
+contribution for that day. Updates require optimistic versions and append
+immutable contribution revisions. Finalization locks the day; changed opinions
+belong in later dated entries instead of silently rewriting history.
+
+Candidate events provide a lightweight importance hook for decisions,
+realizations, milestones, disagreements, failures, completions, and evidence.
+PostgreSQL full-text search returns original contribution or candidate passages
+and supports date, author, topic, project, and importance filters. PostgreSQL is
+canonical; every entry also has a deterministic Markdown rendering for export
+and long-term inspection. See `docs/journal-architecture.md`.
+
+The Journal UI is part of the standalone Locker. Local agents can use
+`pnpm journal`; ChatGPT and other MCP-native clients use the six Journal tools
+registered by the existing Locker MCP process.
+
 ## Projects, tags, activity, and context
 
 The preview includes a Projects & Tags manager. Project deletion is intentionally
@@ -119,13 +147,15 @@ content validation, and retention behavior.
 
 ## MCP Apps plugin
 
-The personal plugin package under `plugins/spore-locker` registers fifteen tools
+The personal plugin package under `plugins/spore-locker` registers twenty-one tools
 and an MCP Apps inline UI card. The surface supports filtered task discovery,
 full task and dependency context, a derived agent work queue, read-only
 project/tag structure, safe text/link/file metadata, portable workspace-relative
 references, filtered activity, and evidence-rich completion handoffs. Completion
 submission marks a task `DONE` and creates a durable handoff artifact. Approval
-is a separate MCP action so the deciding actor remains explicit in history.
+is a separate MCP action so the deciding actor remains explicit in history. Six
+additional tools read, search, contribute to, flag events for, reflect over, and
+finalize the multi-agent Journal.
 
 This MCP is currently unauthenticated and must remain local. The legacy
 Cloudflare tunnel is profile-gated as `public-mcp` and must remain stopped until

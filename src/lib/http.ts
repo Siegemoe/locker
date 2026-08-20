@@ -16,7 +16,13 @@ export function apiError(error: unknown) {
       "Only a completed, active task can be approved",
       "A task must be approved before it can be archived",
       "Task is not archived",
-      "Archive this project or reassign its tasks before deleting it"
+      "Archive this project or reassign its tasks before deleting it",
+      "Finalized Journal entries cannot be changed",
+      "Journal contribution changed since it was loaded",
+      "Journal contribution does not exist at that version",
+      "Journal candidates must be unused events from the same day",
+      "Journal entry is already finalized",
+      "Journal entry changed since it was loaded"
     ];
     if (expected.includes(error.message)) {
       return NextResponse.json({ error: error.message }, { status: 409 });

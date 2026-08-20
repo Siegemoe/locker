@@ -3,6 +3,7 @@
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
+import Journal from "./journal";
 
 type Activity = { id: string; actorType: string; actorLabel: string; action: string; summary: string; createdAt: string };
 type Project = { id: string; key: string; name: string; description: string | null; color: string | null; status: string; archivedAt: string | null };
@@ -21,6 +22,9 @@ type WorkspaceActivity = Activity & {
   task: { id: string; title: string } | null;
   tag: { id: string; name: string } | null;
   artifact: { id: string; title: string; kind: string } | null;
+  journalEntry: { id: string; entryDate: string; title: string } | null;
+  journalContribution: { id: string; authorLabel: string } | null;
+  journalCandidate: { id: string; summary: string; kind: string } | null;
 };
 type GroupKey = "status" | "classification" | "project" | "none";
 type DialogMode = "detail" | "edit";
@@ -52,7 +56,7 @@ function groupValue(task: Task, key: GroupKey) {
 
 function taskProgress(task: Task) {
   if (task.archivedAt) return "Archived";
-  if (task.approvedAt) return "Human approved";
+  if (task.approvedAt) return "Approved";
   if (task.status === "DONE") return "Awaiting approval";
   if (task.status === "BLOCKED") return "Needs a decision";
   if (task.status === "IN_PROGRESS") return "Work is moving";
@@ -158,7 +162,7 @@ export default function Workspace({ initialWorkspace }: { initialWorkspace: Work
   const [tags, setTags] = useState(initialWorkspace.tags);
   const [archived, setArchived] = useState<Task[]>([]);
   const [showArchive, setShowArchive] = useState(false);
-  const [section, setSection] = useState<"work" | "manage" | "activity">("work");
+  const [section, setSection] = useState<"work" | "journal" | "manage" | "activity">("work");
   const [activityLog, setActivityLog] = useState<WorkspaceActivity[]>([]);
   const [selected, setSelected] = useState<Task | null>(null);
   const [dialogMode, setDialogMode] = useState<DialogMode>("detail");
@@ -490,13 +494,14 @@ export default function Workspace({ initialWorkspace }: { initialWorkspace: Work
       <div className="viewTabs">
         <button className={section === "work" && !showArchive ? "active" : ""} onClick={() => changeView(false)}>Active <span>{tasks.length}</span></button>
         <button className={section === "work" && showArchive ? "active" : ""} onClick={() => changeView(true)}>Archive</button>
+        <button className={section === "journal" ? "active" : ""} onClick={() => { setSection("journal"); setShowArchive(false); }}>Journal</button>
         <button className={section === "manage" ? "active" : ""} onClick={() => { setSection("manage"); setShowArchive(false); }}>Projects & tags</button>
         <button className={section === "activity" ? "active" : ""} onClick={loadActivity}>Activity</button>
       </div>
       <div className="headerActions"><button className="refreshAction" onClick={() => void refreshCurrent()} disabled={refreshState === "Refreshing…"}>↻ Refresh</button>{section === "work" && !showArchive && <button className="newAction" onClick={(event) => openCreator(event.currentTarget)}>+ New</button>}<span role="status">{refreshState}</span></div>
     </header>
 
-    {section !== "manage" && <section className="filterBar" aria-label="Task controls">
+    {section !== "manage" && section !== "journal" && <section className="filterBar" aria-label="Task controls">
       <label className="searchBox"><span>⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search work, type, or project" /></label>
       {section === "work" && <label>Status<select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}><option value="ALL">All statuses</option>{stages.map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label>}
       <label>Project<select value={projectFilter} onChange={(event) => setProjectFilter(event.target.value)}><option value="ALL">All projects</option><option value="UNSORTED">Unsorted</option>{activeProjects.map((project) => <option value={project.id} key={project.id}>{project.key}</option>)}</select></label>
@@ -507,7 +512,7 @@ export default function Workspace({ initialWorkspace }: { initialWorkspace: Work
         <label>Order<select value={sort} onChange={(event) => setSort(event.target.value)}><option value="UPDATED">Recently changed</option><option value="PRIORITY">Priority</option><option value="OLDEST">Oldest first</option></select></label>
       </> : <>
         <label>Actor<select value={actorFilter} onChange={(event) => setActorFilter(event.target.value)}><option value="ALL">All actors</option><option value="USER">Human</option><option value="AI_TOOL">AI tool</option><option value="SYSTEM">System</option></select></label>
-        <label>Action<select value={actionFilter} onChange={(event) => setActionFilter(event.target.value)}><option value="ALL">All actions</option><option value="task.">Task</option><option value="project.">Project</option><option value="tag.">Tag</option><option value="artifact.">Artifact</option></select></label>
+        <label>Action<select value={actionFilter} onChange={(event) => setActionFilter(event.target.value)}><option value="ALL">All actions</option><option value="task.">Task</option><option value="journal.">Journal</option><option value="project.">Project</option><option value="tag.">Tag</option><option value="artifact.">Artifact</option></select></label>
         <label>Task<select value={taskFilter} onChange={(event) => setTaskFilter(event.target.value)}><option value="ALL">All tasks</option>{tasks.map((task) => <option value={task.id} key={task.id}>{task.title}</option>)}</select></label>
         <label>Time<select value={daysFilter} onChange={(event) => setDaysFilter(event.target.value)}><option value="7">7 days</option><option value="30">30 days</option><option value="90">90 days</option><option value="365">1 year</option><option value="ALL">All time</option></select></label>
         <button className="applyFilters" onClick={loadActivity}>Apply</button>
@@ -539,6 +544,8 @@ export default function Workspace({ initialWorkspace }: { initialWorkspace: Work
         <p className="railNote">A compact baseline for later cycle time, throughput, and project health analytics.</p>
       </aside>
     </div>}
+
+    {section === "journal" && <Journal workspaceId={initialWorkspace.id} projects={projects} />}
 
     {section === "manage" && <section className="managementPage">
       <div className="pageIntro"><p className="eyebrow">WORKSPACE STRUCTURE</p><h1>Projects and tags</h1><p>Projects organize work; tags describe it. Archiving hides a filter without breaking task history.</p></div>
@@ -600,7 +607,7 @@ export default function Workspace({ initialWorkspace }: { initialWorkspace: Work
           <time>{dateTimeFormatter.format(new Date(event.createdAt))}</time>
           <span><b>{event.actorLabel}</b><small>{event.actorType.replace("_", " ")}</small></span>
           <code>{event.action}</code>
-          <span>{event.task?.title ?? event.project?.name ?? event.tag?.name ?? event.artifact?.title ?? "Workspace"}</span>
+          <span>{event.task?.title ?? event.journalContribution?.authorLabel ?? event.journalCandidate?.summary ?? event.journalEntry?.title ?? event.project?.name ?? event.tag?.name ?? event.artifact?.title ?? "Workspace"}</span>
           <p>{event.summary}</p>
         </article>)}
         {!activityLog.length && <div className="emptyPanel">No activity matches these filters.</div>}

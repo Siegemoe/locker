@@ -196,7 +196,10 @@ export async function listActivity(
       project: { select: { id: true, key: true, name: true } },
       task: { select: { id: true, title: true } },
       tag: { select: { id: true, name: true } },
-      artifact: { select: { id: true, title: true, kind: true } }
+      artifact: { select: { id: true, title: true, kind: true } },
+      journalEntry: { select: { id: true, entryDate: true, title: true } },
+      journalContribution: { select: { id: true, authorLabel: true } },
+      journalCandidate: { select: { id: true, summary: true, kind: true } }
     },
     orderBy: { createdAt: "desc" },
     take: Math.min(Math.max(filters.limit ?? 500, 1), 501)

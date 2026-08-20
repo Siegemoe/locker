@@ -56,6 +56,34 @@ enum ArtifactKind {
   FILE_METADATA
 }
 
+enum JournalEntryStatus {
+  OPEN
+  FINALIZED
+}
+
+enum JournalRole {
+  REFLECTION
+  USER_DECISION
+  AGENT_OBSERVATION
+  AGENT_HYPOTHESIS
+  AGENT_RECOMMENDATION
+  OBJECTIVE_ACTIVITY
+}
+
+enum JournalCandidateKind {
+  DECISION
+  REALIZATION
+  MILESTONE
+  DIRECTION_CHANGE
+  ABANDONED_ASSUMPTION
+  IDEA
+  DISAGREEMENT
+  FAILURE
+  CHANGE_OF_MIND
+  COMPLETION
+  EVIDENCE
+}
+
 model User {
   id          String            @id @default(uuid()) @db.Uuid
   externalId  String?           @unique
@@ -77,6 +105,7 @@ model Workspace {
   tasks       Task[]
   tags        Tag[]
   artifacts   Artifact[]
+  journalEntries JournalEntry[]
   activities  Activity[]
   createdAt   DateTime          @default(now())
   updatedAt   DateTime          @updatedAt
@@ -105,6 +134,8 @@ model Project {
   status      ProjectStatus @default(ACTIVE)
   color       String?
   tasks       Task[]
+  journalContributions JournalContributionProject[]
+  journalCandidates JournalCandidate[]
   activities  Activity[]
   createdAt   DateTime      @default(now())
   updatedAt   DateTime      @updatedAt
@@ -208,6 +239,104 @@ model TaskDependency {
   @@index([dependsOnId])
 }
 
+model JournalEntry {
+  id            String             @id @default(uuid()) @db.Uuid
+  workspaceId   String             @db.Uuid
+  entryDate     DateTime           @db.Date
+  title         String
+  subtitle      String?
+  status        JournalEntryStatus @default(OPEN)
+  version       Int                @default(1)
+  finalizedAt   DateTime?
+  finalizedBy   String?
+  workspace     Workspace          @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  contributions JournalContribution[]
+  candidates    JournalCandidate[]
+  activities    Activity[]
+  createdAt     DateTime           @default(now())
+  updatedAt     DateTime           @updatedAt
+
+  @@unique([workspaceId, entryDate])
+  @@index([workspaceId, entryDate(sort: Desc)])
+}
+
+model JournalContribution {
+  id               String                       @id @default(uuid()) @db.Uuid
+  entryId          String                       @db.Uuid
+  authorKey        String
+  authorLabel      String
+  modelId          String?
+  role             JournalRole                  @default(REFLECTION)
+  bodyMarkdown     String
+  topics           String[]
+  importance       Int                          @default(3)
+  sourceReferences Json?
+  version          Int                          @default(1)
+  entry            JournalEntry                 @relation(fields: [entryId], references: [id], onDelete: Cascade)
+  projects         JournalContributionProject[]
+  revisions        JournalContributionRevision[]
+  activities       Activity[]
+  createdAt        DateTime                     @default(now())
+  updatedAt        DateTime                     @updatedAt
+
+  @@unique([entryId, authorKey])
+  @@index([authorKey, updatedAt(sort: Desc)])
+  @@index([importance])
+}
+
+model JournalContributionProject {
+  contributionId String              @db.Uuid
+  projectId      String              @db.Uuid
+  contribution   JournalContribution @relation(fields: [contributionId], references: [id], onDelete: Cascade)
+  project        Project             @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  createdAt      DateTime            @default(now())
+
+  @@id([contributionId, projectId])
+  @@index([projectId])
+}
+
+model JournalContributionRevision {
+  id               String              @id @default(uuid()) @db.Uuid
+  contributionId   String              @db.Uuid
+  version          Int
+  authorLabel      String
+  modelId          String?
+  role             JournalRole
+  bodyMarkdown     String
+  topics           String[]
+  importance       Int
+  sourceReferences Json?
+  createdBy        String
+  contribution     JournalContribution @relation(fields: [contributionId], references: [id], onDelete: Cascade)
+  createdAt        DateTime            @default(now())
+
+  @@unique([contributionId, version])
+  @@index([contributionId, createdAt(sort: Desc)])
+}
+
+model JournalCandidate {
+  id               String               @id @default(uuid()) @db.Uuid
+  entryId          String               @db.Uuid
+  projectId        String?              @db.Uuid
+  authorKey        String
+  authorLabel      String
+  modelId          String?
+  kind             JournalCandidateKind
+  summary          String
+  contextMarkdown  String?
+  importance       Int                  @default(3)
+  sourceReferences Json?
+  consumedAt       DateTime?
+  entry            JournalEntry         @relation(fields: [entryId], references: [id], onDelete: Cascade)
+  project          Project?             @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  activities       Activity[]
+  createdAt        DateTime             @default(now())
+
+  @@index([entryId, createdAt])
+  @@index([projectId, createdAt(sort: Desc)])
+  @@index([authorKey, createdAt(sort: Desc)])
+}
+
 model Activity {
   id          String            @id @default(uuid()) @db.Uuid
   workspaceId String            @db.Uuid
@@ -216,6 +345,9 @@ model Activity {
   actorUserId String?           @db.Uuid
   tagId       String?           @db.Uuid
   artifactId  String?           @db.Uuid
+  journalEntryId String?        @db.Uuid
+  journalContributionId String? @db.Uuid
+  journalCandidateId String?    @db.Uuid
   actorType   ActivityActorType
   actorLabel  String
   action      String
@@ -227,10 +359,16 @@ model Activity {
   actorUser   User?             @relation("ActivityUser", fields: [actorUserId], references: [id], onDelete: SetNull)
   tag         Tag?              @relation(fields: [tagId], references: [id], onDelete: SetNull)
   artifact    Artifact?         @relation(fields: [artifactId], references: [id], onDelete: SetNull)
+  journalEntry JournalEntry?    @relation(fields: [journalEntryId], references: [id], onDelete: SetNull)
+  journalContribution JournalContribution? @relation(fields: [journalContributionId], references: [id], onDelete: SetNull)
+  journalCandidate JournalCandidate? @relation(fields: [journalCandidateId], references: [id], onDelete: SetNull)
   createdAt   DateTime          @default(now())
 
   @@index([workspaceId, createdAt(sort: Desc)])
   @@index([taskId, createdAt(sort: Desc)])
   @@index([tagId, createdAt(sort: Desc)])
   @@index([artifactId, createdAt(sort: Desc)])
+  @@index([journalEntryId, createdAt(sort: Desc)])
+  @@index([journalContributionId, createdAt(sort: Desc)])
+  @@index([journalCandidateId, createdAt(sort: Desc)])
 }

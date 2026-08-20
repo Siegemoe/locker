@@ -55,7 +55,9 @@ async function main() {
   for (const name of [
     "open_spore_locker", "get_spore_task_context", "list_spore_workspace_structure",
     "get_spore_work_queue", "plan_spore_task_dependencies", "submit_spore_completion",
-    "approve_spore_task", "attach_spore_workspace_reference", "list_spore_activity"
+    "approve_spore_task", "attach_spore_workspace_reference", "list_spore_activity",
+    "get_spore_journal_entry", "upsert_spore_journal_contribution", "flag_spore_journal_candidate",
+    "search_spore_journal", "get_spore_agent_reflections", "finalize_spore_journal_entry"
   ]) assert(names.has(name), `Missing MCP tool: ${name}`);
 
   const resources = await client.listResources();
