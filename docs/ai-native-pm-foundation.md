@@ -55,9 +55,9 @@ of sync with tasks.
 
 ## Boundaries retained
 
-- Local unauthenticated MCP must not be exposed publicly. The legacy Cloudflare
-  tunnel stays profile-gated and stopped until OAuth-backed request identity is
-  implemented.
+- Local unauthenticated MCP must not be exposed publicly. The distributable
+  Compose stack includes no public tunnel; remote deployment waits for
+  OAuth-backed request identity and workspace authorization.
 - Archive remains recoverable and separate from approval.
 - Activity is append-only and actor-labelled.
 - Filesystem access is not implied by a stored path reference. The allowlisted

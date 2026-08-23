@@ -3,13 +3,13 @@
   "version": "0.6.0",
   "description": "Local-first planning and multi-agent Journal context with an interactive MCP Apps card.",
   "author": {
-    "name": "Local developer"
+    "name": "Spore Locker contributors"
   },
   "interface": {
     "displayName": "Spore Locker",
     "shortDescription": "Shared local tasks in chat",
     "longDescription": "Plan dependency-aware work and maintain a persistent, attributed multi-agent Journal beside the conversation. Task and Journal changes share PostgreSQL, provenance, and an actor-aware activity trail.",
-    "developerName": "Local developer",
+    "developerName": "Spore Locker contributors",
     "category": "Productivity",
     "capabilities": ["Interactive", "Read", "Write"],
     "defaultPrompt": [

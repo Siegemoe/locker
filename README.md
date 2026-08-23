@@ -19,6 +19,26 @@ decisions; it is not itself an agent runner or code-execution runtime.
 - Local development identity boundary and bearer-token boundary for HTTP API tools
 - Seed data for the first Spore Locker board
 
+## Requirements
+
+- Node.js 22 or 24
+- Corepack with pnpm 11.19
+- Docker Desktop or Docker Engine with Compose v2
+
+## Quick start
+
+```powershell
+corepack enable
+pnpm install --frozen-lockfile
+pnpm setup:local
+docker compose --env-file .env.compose up -d --build
+```
+
+Open `http://127.0.0.1:3000`. The MCP endpoint is available only on the local
+machine at `http://127.0.0.1:8787/mcp`. On Windows, `Start Spore Locker.cmd`
+performs the local-secret setup, starts the same Compose project, and opens the
+preview.
+
 ## Docker Desktop runtime
 
 The ready-to-use topology is an isolated Compose project named
@@ -28,10 +48,9 @@ the preview (`127.0.0.1:3000`) and MCP endpoint
 (`127.0.0.1:8787/mcp`) are reachable from this machine. Spore Locker does not
 inspect, share, or depend on another local database stack.
 
-Double-click `Start Spore Locker.cmd` to build or start the isolated stack and
-open the preview. The launcher reads the gitignored `.env.compose`, does not
-print its database credential, requests no elevation, and targets only the
-`spore-locker-isolated` Compose project.
+The launcher reads the gitignored `.env.compose`, does not print its database
+credential, requests no elevation, and targets only the `spore-locker-isolated`
+Compose project.
 
 The containers use `restart: unless-stopped`, so they resume after the Docker
 engine starts. Docker Desktop itself must still be running. Enable **Start
@@ -69,6 +88,7 @@ Useful commands:
 
 ```powershell
 pnpm check
+pnpm check:repo
 pnpm build
 pnpm verify:lifecycle
 pnpm verify:mcp
@@ -157,14 +177,22 @@ is a separate MCP action so the deciding actor remains explicit in history. Six
 additional tools read, search, contribute to, flag events for, reflect over, and
 finalize the multi-agent Journal.
 
-This MCP is currently unauthenticated and must remain local. The legacy
-Cloudflare tunnel is profile-gated as `public-mcp` and must remain stopped until
-OAuth 2.1 protected-resource discovery and per-request access-token validation
-are implemented. It grants delegated planning and task-lifecycle authority but
-does not itself execute code or act as a workflow runtime. Project and tag
-administration remains in the standalone Locker for this first PM slice; MCP
-can discover all structure and assign existing values to tasks.
+This MCP is currently unauthenticated and must remain local. The repository does
+not include a public-tunnel service. Any remote deployment must first implement
+OAuth 2.1 protected-resource discovery, per-request access-token validation, and
+workspace authorization. MCP grants delegated planning and task-lifecycle
+authority but does not itself execute code or act as a workflow runtime. Project
+and tag administration remains in the standalone Locker for this first PM slice;
+MCP can discover all structure and assign existing values to tasks.
 
-The local plugin connects to `http://127.0.0.1:8787/mcp`. Do not enable the
-`public-mcp` profile for remote ChatGPT registration until that authentication
-boundary exists.
+The local plugin connects to `http://127.0.0.1:8787/mcp`.
+
+## Repository and security checks
+
+`pnpm check:repo` fails if a tracked environment file, private-key marker,
+common credential format, or machine-specific Windows user path enters the
+working tree. GitHub Actions runs repository safety, lint, type checking, Prisma
+generation, and the production build for every push and pull request.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the development workflow and
+[SECURITY.md](SECURITY.md) for the trust boundary and vulnerability reporting.

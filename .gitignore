@@ -1,4 +1,5 @@
 node_modules/
+.pnpm-store/
 .next/
 out/
 coverage/
@@ -6,6 +7,7 @@ coverage/
 .env.*
 !.env.example
 .env.compose
+cloudflared/
 *.log
 *.tsbuildinfo
 .DS_Store

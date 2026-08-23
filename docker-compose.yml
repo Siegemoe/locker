@@ -76,20 +76,6 @@ services:
       timeout: 3s
       retries: 10
 
-  tunnel:
-    image: cloudflare/cloudflared:2026.7.3
-    profiles: ["public-mcp"]
-    restart: unless-stopped
-    command: ["tunnel", "--config", "/etc/cloudflared/config.yml", "run"]
-    volumes:
-      - ./cloudflared/config.yml:/etc/cloudflared/config.yml:ro
-      - C:/Users/zghor/.cloudflared/1e593c8f-a7f0-4e17-b3b7-b3a0a8ed3143.json:/etc/cloudflared/credentials.json:ro
-    depends_on:
-      mcp:
-        condition: service_healthy
-    networks:
-      - spore_locker_host
-
   tailscale:
     image: tailscale/tailscale:v1.98.9
     profiles: ["tailscale"]
