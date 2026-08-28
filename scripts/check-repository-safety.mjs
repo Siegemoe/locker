@@ -29,7 +29,9 @@ for (const file of trackedFiles) {
   if (content.includes("\0")) continue;
 
   const checks = [
-    ["private key marker", new RegExp(["BEGIN ", "PRIVATE KEY"].join(""))],
+    // Spelled with \s+ so the scanner cannot match its own source text; this
+    // also catches OpenSSH headers, which interleave a word before the marker.
+    ["private key marker", new RegExp("PRIVATE\\s+KEY")],
     ["GitHub token", /gh[pousr]_[A-Za-z0-9_]{30,}/],
     ["OpenAI-style secret key", /sk-[A-Za-z0-9_-]{20,}/],
     ["AWS access key", /AKIA[0-9A-Z]{16}/],

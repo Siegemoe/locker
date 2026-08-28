@@ -60,6 +60,7 @@ services:
     environment:
       DATABASE_URL: "postgresql://spore_locker_owner:${SPORE_DB_PASSWORD}@postgres:5432/spore_locker_local?schema=public"
       MCP_PORT: "8787"
+      MCP_HOST: "0.0.0.0"
       MCP_TRANSPORT: "http"
     command: ["pnpm", "mcp:http"]
     ports:

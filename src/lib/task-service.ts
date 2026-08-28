@@ -162,6 +162,9 @@ export async function updateTask(
       include: { tags: { select: { tagId: true } } }
     });
     if (current.archivedAt) throw new Error("Restore this task before editing it");
+    if (patch.status === "DONE" && actor.type !== "USER") {
+      throw new Error("AI tools must record a completion handoff instead of marking tasks DONE directly");
+    }
     if (patch.status === "DONE") {
       await lockTaskRow(tx, id);
       await assertNoOpenIssues(tx, id);
@@ -281,8 +284,8 @@ async function lifecycleEvent(
     }
 
     const now = new Date();
-    const task = await tx.task.update({
-      where: { id },
+    const result = await tx.task.updateMany({
+      where: { id, version },
       data:
         action === "approve"
           ? { approvedAt: now, approvedBy: actor.label, version: { increment: 1 } }
@@ -290,6 +293,8 @@ async function lifecycleEvent(
             ? { archivedAt: now, version: { increment: 1 } }
             : { archivedAt: null, version: { increment: 1 } }
     });
+    if (result.count !== 1) throw new Error("Task changed since it was loaded");
+    const task = await tx.task.findUniqueOrThrow({ where: { id } });
     const event = action === "approve" ? "approved" : action === "archive" ? "archived" : "restored";
     await tx.activity.create({
       data: {

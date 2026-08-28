@@ -45,7 +45,9 @@ export function apiError(error: unknown) {
       "Task must be an active task in the same workspace as the issue",
       "Issues cannot attach to a DONE or CANCELED task",
       "Attach this issue to a task in its own project, or assign it to a new task",
-      "An artifact needs exactly one owner: a task or an issue"
+      "An artifact needs exactly one owner: a task or an issue",
+      "AI tools must record a completion handoff instead of marking tasks DONE directly",
+      "USER_DECISION contributions record the human's voice and can only be written by the user"
     ];
     const expectedPrefixes = [
       // The close gate names the offending issue codes, so the message varies.

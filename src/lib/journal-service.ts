@@ -96,6 +96,9 @@ export async function upsertJournalContribution(
   },
   actor: TaskActor
 ) {
+  if (input.role === "USER_DECISION" && actor.type !== "USER") {
+    throw new Error("USER_DECISION contributions record the human's voice and can only be written by the user");
+  }
   const entryDate = parseJournalDate(input.date);
   return db.$transaction(async (tx) => {
     const entry = await ensureEntry(tx, input.workspaceId, entryDate);
@@ -121,11 +124,17 @@ export async function upsertJournalContribution(
       importance: input.importance ?? 3,
       sourceReferences: input.sourceReferences ?? Prisma.JsonNull
     };
+    if (existing) {
+      // Guard the write with the version read in this transaction so a racing
+      // update cannot land between the check above and this write.
+      const updated = await tx.journalContribution.updateMany({
+        where: { id: existing.id, version: existing.version },
+        data: { ...common, version: { increment: 1 } }
+      });
+      if (updated.count !== 1) throw new Error("Journal contribution changed since it was loaded");
+    }
     const contribution = existing
-      ? await tx.journalContribution.update({
-          where: { id: existing.id },
-          data: { ...common, version: { increment: 1 } }
-        })
+      ? await tx.journalContribution.findUniqueOrThrow({ where: { id: existing.id } })
       : await tx.journalContribution.create({
           data: { entryId: entry.id, authorKey: input.authorKey, ...common }
         });

@@ -142,6 +142,12 @@ async function main() {
   let queue = await call<WorkQueue>("get_spore_work_queue");
   assert(queue.blocked.some((item) => item.id === context.task.id));
 
+  // AI tools cannot skip the durable handoff by setting DONE directly.
+  const directDone = await callError("update_spore_task", {
+    id: context.task.id, version: context.task.version, status: "DONE"
+  });
+  assert(directDone.includes("must record a completion handoff"));
+
   const prerequisiteContext = await call<TaskContext>("submit_spore_completion", {
     id: prerequisite.id, version: prerequisite.version, summary: "Satisfied the dependency for queue verification."
   });

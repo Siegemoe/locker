@@ -4,26 +4,32 @@ import { createSporeServer } from "./server";
 
 const port = Number(process.env.MCP_PORT ?? 8787);
 const path = "/mcp";
+// Direct runs bind loopback only. The Compose service must bind all interfaces
+// because docker-proxy reaches the container over its network address, not its
+// loopback; the published host port stays pinned to 127.0.0.1 instead.
+const host = process.env.MCP_HOST ?? "127.0.0.1";
+// DNS rebinding sends an attacker-chosen Host header; anything outside this
+// allowlist is refused. Compose clients use 127.0.0.1/localhost plus the
+// in-container healthcheck, which is what the default covers.
+const allowedHosts = new Set(
+  (process.env.MCP_ALLOWED_HOSTS ?? `127.0.0.1:${port},localhost:${port},[::1]:${port}`)
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean)
+);
 
 const httpServer = createServer(async (request, response) => {
+  if (request.headers.host && !allowedHosts.has(request.headers.host)) {
+    response.writeHead(403).end("Forbidden");
+    return;
+  }
   const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
   if (request.method === "GET" && url.pathname === "/") {
     response.writeHead(200, { "content-type": "application/json" });
     response.end(JSON.stringify({ service: "spore-locker-mcp", status: "ok", endpoint: path }));
     return;
   }
-  if (request.method === "OPTIONS" && url.pathname === path) {
-    response.writeHead(204, {
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "POST, GET, DELETE, OPTIONS",
-      "Access-Control-Allow-Headers": "content-type, mcp-session-id",
-      "Access-Control-Expose-Headers": "Mcp-Session-Id"
-    }).end();
-    return;
-  }
   if (url.pathname === path && request.method && ["POST", "GET", "DELETE"].includes(request.method)) {
-    response.setHeader("Access-Control-Allow-Origin", "*");
-    response.setHeader("Access-Control-Expose-Headers", "Mcp-Session-Id");
     const server = createSporeServer();
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
@@ -45,6 +51,6 @@ const httpServer = createServer(async (request, response) => {
   response.writeHead(404).end("Not found");
 });
 
-httpServer.listen(port, "0.0.0.0", () => {
-  console.error(`Spore Locker MCP listening on http://0.0.0.0:${port}${path}`);
+httpServer.listen(port, host, () => {
+  console.error(`Spore Locker MCP listening on http://${host}:${port}${path}`);
 });

@@ -478,7 +478,7 @@ registerAppTool(server, "capture_spore_task", {
 
 registerAppTool(server, "update_spore_task", {
   title: "Update a Spore Locker task",
-  description: "Updates task details, priority, or work stage using optimistic versioning.",
+  description: "Updates task details, priority, or work stage using optimistic versioning. Setting status DONE directly is reserved for the human UI; AI tools must record evidence with submit_spore_completion instead.",
   inputSchema: {
     id: z.string().uuid(), version: z.number().int().positive(),
     title: z.string().trim().min(1).max(200).optional(),
