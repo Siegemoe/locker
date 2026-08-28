@@ -11,6 +11,9 @@ import {
 } from "../lib/task-service";
 import { createArtifact, listActivity } from "../lib/workspace-service";
 import {
+  assignIssue, createIssue, issueContext, issueLifecycle, listIssues, updateIssue
+} from "../lib/issue-service";
+import {
   finalizeJournalEntry, flagJournalCandidate, getAgentReflections, getJournalEntry,
   journalDateString, renderJournalMarkdown, searchJournal, upsertJournalContribution,
   type JournalEntryWithContext
@@ -30,6 +33,27 @@ const artifactSchema = z.object({
   url: z.string().nullable(), textContent: z.string().nullable(), fileName: z.string().nullable(),
   mimeType: z.string().nullable(), sizeBytes: z.number().nullable()
 });
+const issueKindSchema = z.enum(["BUG", "REGRESSION", "DEBT"]);
+const issueSeveritySchema = z.enum(["CRITICAL", "HIGH", "MEDIUM", "LOW"]);
+const issueStatusSchema = z.enum(["OPEN", "TRIAGED", "RESOLVED", "CLOSED"]);
+const issueCloseReasonSchema = z.enum(["FIXED", "WONT_FIX", "DUPLICATE", "NOT_A_BUG"]);
+const issueRefSchema = z.object({
+  code: z.string(), title: z.string(), status: issueStatusSchema, severity: issueSeveritySchema
+});
+const issueSchema = z.object({
+  id: z.string(), code: z.string(), kind: issueKindSchema, title: z.string(),
+  details: z.string().nullable(), status: issueStatusSchema, severity: issueSeveritySchema,
+  closeReason: issueCloseReasonSchema.nullable(),
+  project: z.object({ id: z.string(), key: z.string(), name: z.string() }),
+  assignedTaskId: z.string().nullable(),
+  assignedTask: z.object({ id: z.string(), title: z.string(), status: z.string() }).nullable(),
+  duplicateOfId: z.string().nullable(),
+  duplicateOf: z.object({ id: z.string(), code: z.string(), title: z.string() }).nullable(),
+  reportedBy: z.string().nullable(), version: z.number(),
+  resolvedAt: z.string().nullable(), closedAt: z.string().nullable(),
+  createdAt: z.string(), updatedAt: z.string(),
+  artifacts: z.array(artifactSchema)
+});
 const relatedTaskSchema = z.object({
   id: z.string(), title: z.string(), status: z.string(), archivedAt: z.string().nullable()
 });
@@ -43,6 +67,7 @@ const taskSchema = z.object({
   approvedBy: z.string().nullable(), archivedAt: z.string().nullable(),
   projectKey: z.string().nullable(), projectId: z.string().nullable(),
   tags: z.array(tagSchema), artifacts: z.array(artifactSchema),
+  assignedIssues: z.array(issueRefSchema),
   dependencies: z.array(dependencySchema), dependents: z.array(dependencySchema), actionable: z.boolean()
 });
 const boardSchema = {
@@ -54,6 +79,7 @@ const activitySchema = z.object({
   id: z.string(), action: z.string(), summary: z.string(), actorType: z.string(), actorLabel: z.string(),
   createdAt: z.string(), project: z.object({ id: z.string(), key: z.string(), name: z.string() }).nullable(),
   task: z.object({ id: z.string(), title: z.string() }).nullable(),
+  issue: z.object({ id: z.string(), code: z.string(), title: z.string() }).nullable(),
   tag: z.object({ id: z.string(), name: z.string() }).nullable(),
   artifact: z.object({ id: z.string(), title: z.string(), kind: z.string() }).nullable(),
   journalEntry: z.object({ id: z.string(), date: z.string(), title: z.string() }).nullable(),
@@ -61,6 +87,8 @@ const activitySchema = z.object({
   journalCandidate: z.object({ id: z.string(), summary: z.string(), kind: z.string() }).nullable()
 });
 const taskContextSchema = { task: taskSchema, activity: z.array(activitySchema) };
+const issueContextSchema = { issue: issueSchema, activity: z.array(activitySchema) };
+const issueListSchema = { issues: z.array(issueSchema) };
 const projectStructureSchema = z.object({
   id: z.string(), key: z.string(), name: z.string(), description: z.string().nullable(),
   status: z.string(), color: z.string().nullable(), archivedAt: z.string().nullable(), taskCount: z.number()
@@ -135,6 +163,7 @@ function serialize(task: Awaited<ReturnType<typeof listTasks>>[number]) {
       textContent: artifact.textContent, fileName: artifact.fileName,
       mimeType: artifact.mimeType, sizeBytes: artifact.sizeBytes
     })),
+    assignedIssues: task.assignedIssues.map(({ code, title, status, severity }) => ({ code, title, status, severity })),
     dependencies,
     dependents: task.dependents.map(({ type, task: dependent }) => ({
       type, task: {
@@ -172,11 +201,41 @@ function result<T extends object>(data: T, text: string) {
   return { structuredContent: data, content: [{ type: "text" as const, text }] };
 }
 
+function serializeIssue(issue: Awaited<ReturnType<typeof listIssues>>[number]) {
+  return {
+    id: issue.id, code: issue.code, kind: issue.kind, title: issue.title,
+    details: issue.details, status: issue.status, severity: issue.severity,
+    closeReason: issue.closeReason, project: issue.project,
+    assignedTaskId: issue.assignedTaskId,
+    assignedTask: issue.assignedTask
+      ? { id: issue.assignedTask.id, title: issue.assignedTask.title, status: issue.assignedTask.status }
+      : null,
+    duplicateOfId: issue.duplicateOfId,
+    duplicateOf: issue.duplicateOf
+      ? { id: issue.duplicateOf.id, code: issue.duplicateOf.code, title: issue.duplicateOf.title }
+      : null,
+    reportedBy: issue.reportedBy, version: issue.version,
+    resolvedAt: issue.resolvedAt?.toISOString() ?? null,
+    closedAt: issue.closedAt?.toISOString() ?? null,
+    createdAt: issue.createdAt.toISOString(), updatedAt: issue.updatedAt.toISOString(),
+    artifacts: issue.artifacts.map((artifact) => ({
+      id: artifact.id, kind: artifact.kind, title: artifact.title, url: artifact.url,
+      textContent: artifact.textContent, fileName: artifact.fileName,
+      mimeType: artifact.mimeType, sizeBytes: artifact.sizeBytes
+    }))
+  };
+}
+
+async function issueResult(workspaceId: string, issueId: string) {
+  const context = await issueContext(workspaceId, issueId);
+  return { issue: serializeIssue(context), activity: context.activities.map(serializeActivity) };
+}
+
 function serializeActivity(event: Awaited<ReturnType<typeof listActivity>>[number]) {
   return {
     id: event.id, action: event.action, summary: event.summary, actorType: event.actorType,
     actorLabel: event.actorLabel, createdAt: event.createdAt.toISOString(),
-    project: event.project, task: event.task, tag: event.tag, artifact: event.artifact,
+    project: event.project, task: event.task, issue: event.issue, tag: event.tag, artifact: event.artifact,
     journalEntry: event.journalEntry ? {
       id: event.journalEntry.id,
       date: journalDateString(event.journalEntry.entryDate),
@@ -248,6 +307,7 @@ async function taskContext(taskId: string) {
       project: { select: { id: true, key: true, name: true } },
       tags: { include: { tag: true }, orderBy: { createdAt: "asc" } },
       artifacts: { where: { archivedAt: null }, orderBy: { createdAt: "desc" } },
+      assignedIssues: { orderBy: { createdAt: "asc" } },
       dependencies: {
         include: { dependsOn: { select: { id: true, title: true, status: true, archivedAt: true } } },
         orderBy: { createdAt: "asc" }
@@ -324,6 +384,7 @@ const server = new McpServer(
     instructions:
       "Spore Locker is a local-first planning and context workspace for autonomous software work. " +
       "Use the dependency-aware work queue to select useful work, keep task plans current, and record lifecycle decisions in the immutable activity trail. " +
+      "Use Issues to record known problems that are not committed work yet: file work-orders against a project, assign them to tasks (which moves them IN TRIAGE), and resolve with evidence notes. Tasks cannot complete while attached issues are OPEN or IN TRIAGE, so resolve attached issues before submitting completion. " +
       "Use the Journal to preserve attributed experience and interpretation across agents without turning it into a transcript log. " +
       "The AI may complete, approve, archive, and restore tasks when the evidence supports the decision; use optimistic versions and preserve completion handoffs. " +
       "The MCP endpoint is currently local and unauthenticated, so do not expose it publicly without per-request authentication."
@@ -555,6 +616,144 @@ registerAppTool(server, "attach_spore_workspace_reference", {
   ].join("\n");
   await createArtifact({ taskId, kind: "TEXT", title, textContent }, aiActor);
   return result(await taskContext(taskId), "Attached the portable workspace reference without reading local files.");
+});
+
+registerAppTool(server, "file_spore_issue", {
+  title: "File a Spore Locker issue",
+  description: "Files a work-order issue against a project with optional metadata-only attachments. Projects name the affected system; without one the issue lands in the UNASSIGNED bucket. Filing never assigns the issue to a task.",
+  inputSchema: {
+    title: z.string().trim().min(1).max(200),
+    details: z.string().max(20_000).optional(),
+    kind: issueKindSchema.optional(),
+    severity: issueSeveritySchema.optional(),
+    projectId: z.string().uuid().optional(),
+    reportedBy: z.string().trim().min(1).max(120).optional(),
+    sourceCandidateId: z.string().uuid().optional(),
+    attachments: z.array(z.object({
+      kind: z.enum(["LINK", "TEXT", "FILE_METADATA"]),
+      title: z.string().trim().min(1).max(160),
+      url: z.string().url().max(2_000).optional(),
+      textContent: z.string().max(100_000).optional(),
+      fileName: z.string().max(255).optional(),
+      mimeType: z.enum(["text/plain", "text/markdown", "application/pdf", "image/png", "image/jpeg", "image/webp"]).optional(),
+      sizeBytes: z.number().int().positive().max(25 * 1024 * 1024).optional()
+    })).max(10).optional()
+  },
+  outputSchema: issueContextSchema,
+  annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: false },
+  _meta: { ui: { visibility: ["model", "app"] } }
+}, async (input) => {
+  const id = await workspaceId();
+  const issue = await createIssue({ workspaceId: id, ...input }, aiActor);
+  return result(await issueResult(id, issue.id), `Filed issue ${issue.code}: ${issue.title}`);
+});
+
+registerAppTool(server, "list_spore_issues", {
+  title: "List Spore Locker issues",
+  description: "Lists and searches work-order issues with status, severity, kind, project, and assignment filters so agents can triage known problems.",
+  inputSchema: {
+    status: issueStatusSchema.optional(), severity: issueSeveritySchema.optional(),
+    kind: issueKindSchema.optional(), projectId: z.string().uuid().optional(),
+    assignedTaskId: z.string().uuid().optional(), unassignedOnly: z.boolean().optional(),
+    query: z.string().trim().max(200).optional(),
+    limit: z.number().int().min(1).max(200).optional()
+  },
+  outputSchema: issueListSchema,
+  annotations: { readOnlyHint: true, openWorldHint: false, destructiveHint: false },
+  _meta: { ui: { visibility: ["model"] } }
+}, async ({ query, limit, ...filters }) => {
+  const id = await workspaceId();
+  let issues = await listIssues(id, { ...filters, limit });
+  const needle = query?.trim().toLowerCase();
+  if (needle) {
+    issues = issues.filter((issue) =>
+      [issue.code, issue.title, issue.details ?? "", issue.project.key].join(" ").toLowerCase().includes(needle));
+  }
+  return result({ issues: issues.map(serializeIssue) }, `Listed ${issues.length} Spore Locker issues.`);
+});
+
+registerAppTool(server, "get_spore_issue_context", {
+  title: "Get complete Spore Locker issue context",
+  description: "Returns one work-order issue with its project, assignment, duplicate links, attachments, and recent immutable activity history.",
+  inputSchema: { issueId: z.string().uuid() },
+  outputSchema: issueContextSchema,
+  annotations: { readOnlyHint: true, openWorldHint: false, destructiveHint: false },
+  _meta: { ui: { visibility: ["model"] } }
+}, async ({ issueId }) =>
+  result(await issueResult(await workspaceId(), issueId), "Loaded the issue context and recent history."));
+
+registerAppTool(server, "update_spore_issue", {
+  title: "Update a Spore Locker issue",
+  description: "Updates an issue's title, details, kind, severity, project, or duplicate link using optimistic versioning. Status changes belong to the lifecycle tools.",
+  inputSchema: {
+    id: z.string().uuid(), version: z.number().int().positive(),
+    title: z.string().trim().min(1).max(200).optional(),
+    details: z.string().max(20_000).nullable().optional(),
+    kind: issueKindSchema.optional(),
+    severity: issueSeveritySchema.optional(),
+    projectId: z.string().uuid().optional(),
+    duplicateOfId: z.string().uuid().nullable().optional()
+  },
+  outputSchema: issueContextSchema,
+  annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: false },
+  _meta: { ui: { visibility: ["model"] } }
+}, async ({ id, version, ...patch }) => {
+  await updateIssue(id, version, patch, aiActor);
+  return result(await issueResult(await workspaceId(), id), "Updated the Spore Locker issue.");
+});
+
+registerAppTool(server, "assign_spore_issue", {
+  title: "Assign a Spore Locker issue to a task",
+  description: "Attaches an OPEN or IN TRIAGE issue to an active task in the issue's own project, or creates a new task for it in that project. Assignment moves the issue IN TRIAGE. DONE and CANCELED tasks refuse new issues.",
+  inputSchema: {
+    id: z.string().uuid(), version: z.number().int().positive(),
+    taskId: z.string().uuid().optional(),
+    newTask: z.object({
+      title: z.string().trim().min(1).max(200),
+      description: z.string().max(20_000).optional(),
+      priority: prioritySchema.optional()
+    }).optional()
+  },
+  outputSchema: issueContextSchema,
+  annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: false },
+  _meta: { ui: { visibility: ["model"] } }
+}, async ({ id, version, taskId, newTask }) => {
+  if (Boolean(taskId) === Boolean(newTask)) throw new Error("Provide either taskId or newTask");
+  const payload = newTask ? { newTask } : { taskId: taskId! };
+  await assignIssue(id, version, payload, aiActor);
+  return result(await issueResult(await workspaceId(), id), "Assigned the issue to a task; it is now IN TRIAGE.");
+});
+
+registerAppTool(server, "resolve_spore_issue", {
+  title: "Resolve a Spore Locker issue",
+  description: "Resolves an OPEN or IN TRIAGE issue. FIXED requires a note describing the fix and rests at RESOLVED awaiting verification; WONT_FIX, NOT_A_BUG, and DUPLICATE (with the original issue id) close outright and cascade to open duplicates.",
+  inputSchema: {
+    id: z.string().uuid(), version: z.number().int().positive(),
+    closeReason: issueCloseReasonSchema.optional(),
+    note: z.string().trim().max(20_000).optional(),
+    duplicateOfId: z.string().uuid().optional()
+  },
+  outputSchema: issueContextSchema,
+  annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: false },
+  _meta: { ui: { visibility: ["model"] } }
+}, async ({ id, version, closeReason, note, duplicateOfId }) => {
+  await issueLifecycle(id, version, "resolve", { closeReason, note, duplicateOfId }, aiActor);
+  return result(await issueResult(await workspaceId(), id), "Recorded the issue resolution in immutable history.");
+});
+
+registerAppTool(server, "reopen_spore_issue", {
+  title: "Reopen a Spore Locker issue",
+  description: "Reopens a RESOLVED or CLOSED issue with a required note explaining what came back. The assignment is cleared and the issue returns to OPEN for re-triage.",
+  inputSchema: {
+    id: z.string().uuid(), version: z.number().int().positive(),
+    note: z.string().trim().min(1).max(20_000)
+  },
+  outputSchema: issueContextSchema,
+  annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: false },
+  _meta: { ui: { visibility: ["model"] } }
+}, async ({ id, version, note }) => {
+  await issueLifecycle(id, version, "reopen", { note }, aiActor);
+  return result(await issueResult(await workspaceId(), id), "Reopened the issue for re-triage.");
 });
 
 registerAppTool(server, "get_spore_journal_entry", {

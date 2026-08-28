@@ -4,6 +4,7 @@ import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "re
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import Journal from "./journal";
+import Issues from "./issues";
 
 type Activity = { id: string; actorType: string; actorLabel: string; action: string; summary: string; createdAt: string };
 type Project = { id: string; key: string; name: string; description: string | null; color: string | null; status: string; archivedAt: string | null };
@@ -162,7 +163,7 @@ export default function Workspace({ initialWorkspace }: { initialWorkspace: Work
   const [tags, setTags] = useState(initialWorkspace.tags);
   const [archived, setArchived] = useState<Task[]>([]);
   const [showArchive, setShowArchive] = useState(false);
-  const [section, setSection] = useState<"work" | "journal" | "manage" | "activity">("work");
+  const [section, setSection] = useState<"work" | "issues" | "journal" | "manage" | "activity">("work");
   const [activityLog, setActivityLog] = useState<WorkspaceActivity[]>([]);
   const [selected, setSelected] = useState<Task | null>(null);
   const [dialogMode, setDialogMode] = useState<DialogMode>("detail");
@@ -494,6 +495,7 @@ export default function Workspace({ initialWorkspace }: { initialWorkspace: Work
       <div className="viewTabs">
         <button className={section === "work" && !showArchive ? "active" : ""} onClick={() => changeView(false)}>Active <span>{tasks.length}</span></button>
         <button className={section === "work" && showArchive ? "active" : ""} onClick={() => changeView(true)}>Archive</button>
+        <button className={section === "issues" ? "active" : ""} onClick={() => { setSection("issues"); setShowArchive(false); }}>Issues</button>
         <button className={section === "journal" ? "active" : ""} onClick={() => { setSection("journal"); setShowArchive(false); }}>Journal</button>
         <button className={section === "manage" ? "active" : ""} onClick={() => { setSection("manage"); setShowArchive(false); }}>Projects & tags</button>
         <button className={section === "activity" ? "active" : ""} onClick={loadActivity}>Activity</button>
@@ -501,7 +503,7 @@ export default function Workspace({ initialWorkspace }: { initialWorkspace: Work
       <div className="headerActions"><button className="refreshAction" onClick={() => void refreshCurrent()} disabled={refreshState === "Refreshing…"}>↻ Refresh</button>{section === "work" && !showArchive && <button className="newAction" onClick={(event) => openCreator(event.currentTarget)}>+ New</button>}<span role="status">{refreshState}</span></div>
     </header>
 
-    {section !== "manage" && section !== "journal" && <section className="filterBar" aria-label="Task controls">
+    {section !== "manage" && section !== "journal" && section !== "issues" && <section className="filterBar" aria-label="Task controls">
       <label className="searchBox"><span>⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search work, type, or project" /></label>
       {section === "work" && <label>Status<select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}><option value="ALL">All statuses</option>{stages.map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label>}
       <label>Project<select value={projectFilter} onChange={(event) => setProjectFilter(event.target.value)}><option value="ALL">All projects</option><option value="UNSORTED">Unsorted</option>{activeProjects.map((project) => <option value={project.id} key={project.id}>{project.key}</option>)}</select></label>
@@ -544,6 +546,8 @@ export default function Workspace({ initialWorkspace }: { initialWorkspace: Work
         <p className="railNote">A compact baseline for later cycle time, throughput, and project health analytics.</p>
       </aside>
     </div>}
+
+    {section === "issues" && <Issues workspaceId={initialWorkspace.id} projects={projects} />}
 
     {section === "journal" && <Journal workspaceId={initialWorkspace.id} projects={projects} />}
 

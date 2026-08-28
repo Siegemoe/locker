@@ -49,6 +49,20 @@ async function main() {
       });
     }
   }
+  const unassigned = await db.project.findUnique({
+    where: { workspaceId_key: { workspaceId: workspace.id, key: "UNASSIGNED" } }
+  });
+  if (!unassigned) {
+    const bucket = await db.project.create({
+      data: { workspaceId: workspace.id, key: "UNASSIGNED", name: "Unassigned", description: "Default bucket for issues filed before a system is named" }
+    });
+    await db.activity.create({
+      data: {
+        workspaceId: workspace.id, projectId: bucket.id, actorType: "SYSTEM", actorLabel: "Spore Locker seed",
+        action: "project.created", summary: "Created default project: Unassigned"
+      }
+    });
+  }
   if ((await db.task.count({ where: { workspaceId: workspace.id } })) === 0) {
     await db.task.createMany({
       data: [

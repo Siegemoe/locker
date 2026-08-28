@@ -9,6 +9,7 @@ import { db } from "../src/lib/db";
 type Task = {
   id: string; title: string; status: string; version: number; approvedAt: string | null; actionable: boolean;
   tags: { id: string; name: string }[]; artifacts: { id: string; kind: string; title: string }[];
+  assignedIssues: { id: string; code: string; title: string; status: string }[];
   dependencies: { type: string; resolved: boolean; task: { id: string; status: string } }[]
 };
 type Board = { tasks: Task[]; archived: boolean; tags: { id: string; name: string }[] };
@@ -17,6 +18,15 @@ type TaskContext = { task: Task; activity: Activity[] };
 type Structure = { projects: { id: string; archivedAt: string | null; taskCount: number }[]; tags: { id: string; archivedAt: string | null; taskCount: number }[] };
 type ActivityList = { activity: Activity[]; limit: number; truncated: boolean };
 type WorkQueue = { actionable: Task[]; blocked: Task[]; counts: { actionable: number; blocked: number } };
+type Issue = {
+  id: string; code: string; title: string; status: string; version: number;
+  closeReason: string | null; assignedTaskId: string | null;
+  assignedTask: { id: string; title: string; status: string } | null;
+  project: { id: string; key: string; name: string };
+  artifacts: { id: string }[];
+};
+type IssueContext = { issue: Issue; activity: Activity[] };
+type IssueList = { issues: Issue[] };
 
 const tsxCli = fileURLToPath(new URL("../node_modules/tsx/dist/cli.mjs", import.meta.url));
 const serverFile = fileURLToPath(new URL("../src/mcp/server.ts", import.meta.url));
@@ -35,6 +45,7 @@ const transport = process.env.MCP_URL
     });
 const client = new Client({ name: "spore-locker-verifier", version: "0.1.0" });
 const verificationTaskIds = new Set<string>();
+const verificationIssueIds = new Set<string>();
 
 async function call<T>(name: string, args: Record<string, unknown> = {}) {
   const response = await client.callTool({ name, arguments: args });
@@ -56,6 +67,8 @@ async function main() {
     "open_spore_locker", "get_spore_task_context", "list_spore_workspace_structure",
     "get_spore_work_queue", "plan_spore_task_dependencies", "submit_spore_completion",
     "approve_spore_task", "attach_spore_workspace_reference", "list_spore_activity",
+    "file_spore_issue", "list_spore_issues", "get_spore_issue_context",
+    "update_spore_issue", "assign_spore_issue", "resolve_spore_issue", "reopen_spore_issue",
     "get_spore_journal_entry", "upsert_spore_journal_contribution", "flag_spore_journal_candidate",
     "search_spore_journal", "get_spore_agent_reflections", "finalize_spore_journal_entry"
   ]) assert(names.has(name), `Missing MCP tool: ${name}`);
@@ -147,6 +160,69 @@ async function main() {
   context = await call<TaskContext>("approve_spore_task", { id: context.task.id, version: context.task.version });
   assert(context.task.approvedAt);
 
+  // Issue work-order loop: file, assign (moves IN TRIAGE), gate, resolve, reopen, duplicate.
+  const filed = await call<IssueContext>("file_spore_issue", {
+    title: "MCP verification issue", details: "Filed by the MCP verifier.",
+    kind: "BUG", severity: "HIGH",
+    attachments: [{ kind: "LINK", title: "Evidence", url: "https://example.test/evidence" }]
+  });
+  verificationIssueIds.add(filed.issue.id);
+  assert.match(filed.issue.code, /^[2-9A-HJKM-NP-Z]{7}$/);
+  assert.equal(filed.issue.status, "OPEN");
+  assert.equal(filed.issue.assignedTaskId, null);
+  assert.equal(filed.issue.project.key, "UNASSIGNED");
+  assert.equal(filed.issue.artifacts.length, 1);
+
+  const assigned = await call<IssueContext>("assign_spore_issue", {
+    id: filed.issue.id, version: filed.issue.version,
+    newTask: { title: "MCP issue verification fix", priority: "HIGH" }
+  });
+  assert.equal(assigned.issue.status, "TRIAGED");
+  const fixTask = assigned.issue.assignedTask;
+  assert(fixTask);
+  verificationTaskIds.add(fixTask.id);
+
+  const fixContext = await call<TaskContext>("get_spore_task_context", { taskId: fixTask.id });
+  assert(fixContext.task.assignedIssues.some((issue) => issue.code === filed.issue.code));
+  const gateError = await callError("submit_spore_completion", {
+    id: fixTask.id, version: fixContext.task.version, summary: "Too early"
+  });
+  assert(gateError.includes("Resolve attached issues before completing this task"));
+
+  const resolved = await call<IssueContext>("resolve_spore_issue", {
+    id: filed.issue.id, version: assigned.issue.version,
+    closeReason: "FIXED", note: "Counts reconciled by the MCP verifier."
+  });
+  assert.equal(resolved.issue.status, "RESOLVED");
+  const done = await call<TaskContext>("submit_spore_completion", {
+    id: fixTask.id, version: fixContext.task.version, summary: "Verified the issue gate path."
+  });
+  assert.equal(done.task.status, "DONE");
+
+  const reopened = await call<IssueContext>("reopen_spore_issue", {
+    id: filed.issue.id, version: resolved.issue.version, note: "The drift came back."
+  });
+  assert.equal(reopened.issue.status, "OPEN");
+  assert.equal(reopened.issue.assignedTaskId, null);
+
+  const duplicate = await call<IssueContext>("file_spore_issue", { title: "MCP verification duplicate", severity: "LOW" });
+  verificationIssueIds.add(duplicate.issue.id);
+  const closedDuplicate = await call<IssueContext>("resolve_spore_issue", {
+    id: duplicate.issue.id, version: duplicate.issue.version,
+    closeReason: "DUPLICATE", duplicateOfId: filed.issue.id
+  });
+  assert.equal(closedDuplicate.issue.status, "CLOSED");
+  assert.equal(closedDuplicate.issue.closeReason, "DUPLICATE");
+
+  const listed = await call<IssueList>("list_spore_issues", { query: "MCP verification", unassignedOnly: true });
+  assert(listed.issues.some((issue) => issue.code === reopened.issue.code));
+  const issueContextLoaded = await call<IssueContext>("get_spore_issue_context", { issueId: reopened.issue.id });
+  assert(issueContextLoaded.activity.some((event) => event.action === "issue.assigned"));
+  const missingNote = await callError("resolve_spore_issue", {
+    id: filed.issue.id, version: reopened.issue.version, closeReason: "FIXED"
+  });
+  assert(missingNote.includes("requires a note"));
+
   const stored = await db.task.findUniqueOrThrow({
     where: { id: context.task.id }, include: { activities: { orderBy: { createdAt: "asc" } } }
   });
@@ -160,10 +236,17 @@ async function main() {
 
 main().finally(async () => {
   await client.close();
-  if (verificationTaskIds.size && !process.env.MCP_URL) {
-    const ids = [...verificationTaskIds];
-    await db.activity.deleteMany({ where: { taskId: { in: ids } } });
-    await db.task.deleteMany({ where: { id: { in: ids } } });
+  if (!process.env.MCP_URL) {
+    if (verificationTaskIds.size) {
+      const ids = [...verificationTaskIds];
+      await db.activity.deleteMany({ where: { taskId: { in: ids } } });
+      await db.task.deleteMany({ where: { id: { in: ids } } });
+    }
+    if (verificationIssueIds.size) {
+      const ids = [...verificationIssueIds];
+      await db.activity.deleteMany({ where: { issueId: { in: ids } } });
+      await db.issue.deleteMany({ where: { id: { in: ids } } });
+    }
   }
   await db.$disconnect();
 });

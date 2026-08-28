@@ -1,5 +1,6 @@
 import type { ActivityActorType, DependencyType, TaskPriority, TaskStatus } from "@prisma/client";
 import { db } from "@/lib/db";
+import { assertNoOpenIssues, lockTaskRow } from "@/lib/issue-service";
 
 export type TaskActor = { type: ActivityActorType; label: string };
 
@@ -10,6 +11,7 @@ export async function listTasks(workspaceId: string, projectId?: string, archive
       project: { select: { id: true, key: true, name: true } },
       tags: { include: { tag: true }, orderBy: { createdAt: "asc" } },
       artifacts: { where: { archivedAt: null }, orderBy: { createdAt: "desc" } },
+      assignedIssues: { orderBy: { createdAt: "asc" } },
       dependencies: {
         include: { dependsOn: { select: { id: true, title: true, status: true, archivedAt: true } } },
         orderBy: { createdAt: "asc" }
@@ -160,6 +162,10 @@ export async function updateTask(
       include: { tags: { select: { tagId: true } } }
     });
     if (current.archivedAt) throw new Error("Restore this task before editing it");
+    if (patch.status === "DONE") {
+      await lockTaskRow(tx, id);
+      await assertNoOpenIssues(tx, id);
+    }
     const { tagIds, ...taskPatch } = patch;
     const result = await tx.task.updateMany({
       where: { id, version, archivedAt: null },
@@ -211,6 +217,8 @@ export async function submitTaskCompletion(
     const current = await tx.task.findUniqueOrThrow({ where: { id } });
     if (current.archivedAt) throw new Error("Restore this task before submitting completion");
     if (current.version !== version) throw new Error("Task changed since it was loaded");
+    await lockTaskRow(tx, id);
+    await assertNoOpenIssues(tx, id);
 
     const checks = input.checks ?? [];
     const unresolved = input.unresolved ?? [];
@@ -266,6 +274,10 @@ async function lifecycleEvent(
     }
     if (action === "restore" && !current.archivedAt) {
       throw new Error("Task is not archived");
+    }
+    if (action === "approve") {
+      await lockTaskRow(tx, id);
+      await assertNoOpenIssues(tx, id);
     }
 
     const now = new Date();

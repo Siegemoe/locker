@@ -70,8 +70,13 @@ export async function restoreProject(id: string, actor: TaskActor) {
 export async function deleteEmptyProject(id: string, actor: TaskActor) {
   return db.$transaction(async (tx) => {
     const project = await tx.project.findUniqueOrThrow({ where: { id } });
+    if (project.key === "UNASSIGNED") {
+      throw new Error("The UNASSIGNED project is the default bucket for new issues and cannot be deleted");
+    }
     const taskCount = await tx.task.count({ where: { projectId: id } });
     if (taskCount) throw new Error("Archive this project or reassign its tasks before deleting it");
+    const issueCount = await tx.issue.count({ where: { projectId: id } });
+    if (issueCount) throw new Error("Archive this project or move its issues before deleting it");
     await tx.activity.create({
       data: {
         workspaceId: project.workspaceId,
@@ -133,19 +138,25 @@ export async function archiveTag(id: string, actor: TaskActor) {
 
 export async function createArtifact(
   input: {
-    taskId: string; kind: ArtifactKind; title: string; url?: string; textContent?: string;
+    taskId?: string; issueId?: string; kind: ArtifactKind; title: string; url?: string; textContent?: string;
     fileName?: string; mimeType?: string; sizeBytes?: number; storageKey?: string;
   },
   actor: TaskActor
 ) {
   return db.$transaction(async (tx) => {
-    const task = await tx.task.findUniqueOrThrow({ where: { id: input.taskId } });
+    if (Boolean(input.taskId) === Boolean(input.issueId)) {
+      throw new Error("An artifact needs exactly one owner: a task or an issue");
+    }
+    const task = input.taskId ? await tx.task.findUniqueOrThrow({ where: { id: input.taskId } }) : null;
+    const issue = input.issueId ? await tx.issue.findUniqueOrThrow({ where: { id: input.issueId } }) : null;
     const artifact = await tx.artifact.create({
-      data: { ...input, workspaceId: task.workspaceId, createdBy: actor.label }
+      data: { ...input, workspaceId: task?.workspaceId ?? issue!.workspaceId, createdBy: actor.label }
     });
     await tx.activity.create({
       data: {
-        workspaceId: task.workspaceId, projectId: task.projectId, taskId: task.id, artifactId: artifact.id,
+        workspaceId: artifact.workspaceId,
+        projectId: task?.projectId ?? issue?.projectId,
+        taskId: task?.id, issueId: issue?.id, artifactId: artifact.id,
         actorType: actor.type, actorLabel: actor.label,
         action: "artifact.created", summary: `Attached ${artifact.kind.toLowerCase()}: ${artifact.title}`,
         metadata: { kind: artifact.kind, url: artifact.url, fileName: artifact.fileName, mimeType: artifact.mimeType, sizeBytes: artifact.sizeBytes }
@@ -157,13 +168,18 @@ export async function createArtifact(
 
 export async function archiveArtifact(id: string, actor: TaskActor) {
   return db.$transaction(async (tx) => {
-    const current = await tx.artifact.findUniqueOrThrow({ where: { id }, include: { task: true } });
+    const current = await tx.artifact.findUniqueOrThrow({ where: { id }, include: { task: true, issue: true } });
     if (current.archivedAt) throw new Error("Artifact is already removed from active context");
-    const artifact = await tx.artifact.update({ where: { id }, data: { archivedAt: new Date() }, include: { task: true } });
+    const artifact = await tx.artifact.update({
+      where: { id },
+      data: { archivedAt: new Date() },
+      include: { task: true, issue: true }
+    });
     await tx.activity.create({
       data: {
-        workspaceId: artifact.workspaceId, projectId: artifact.task.projectId,
-        taskId: artifact.taskId, artifactId: artifact.id,
+        workspaceId: artifact.workspaceId,
+        projectId: artifact.task?.projectId ?? artifact.issue?.projectId,
+        taskId: artifact.taskId, issueId: artifact.issueId, artifactId: artifact.id,
         actorType: actor.type, actorLabel: actor.label,
         action: "artifact.removed", summary: `Removed artifact from active context: ${artifact.title}`
       }
@@ -195,6 +211,7 @@ export async function listActivity(
     include: {
       project: { select: { id: true, key: true, name: true } },
       task: { select: { id: true, title: true } },
+      issue: { select: { id: true, code: true, title: true } },
       tag: { select: { id: true, name: true } },
       artifact: { select: { id: true, title: true, kind: true } },
       journalEntry: { select: { id: true, entryDate: true, title: true } },

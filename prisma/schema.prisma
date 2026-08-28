@@ -84,6 +84,33 @@ enum JournalCandidateKind {
   EVIDENCE
 }
 
+enum IssueKind {
+  BUG
+  REGRESSION
+  DEBT
+}
+
+enum IssueStatus {
+  OPEN
+  TRIAGED
+  RESOLVED
+  CLOSED
+}
+
+enum IssueSeverity {
+  CRITICAL
+  HIGH
+  MEDIUM
+  LOW
+}
+
+enum IssueCloseReason {
+  FIXED
+  WONT_FIX
+  DUPLICATE
+  NOT_A_BUG
+}
+
 model User {
   id          String            @id @default(uuid()) @db.Uuid
   externalId  String?           @unique
@@ -106,6 +133,7 @@ model Workspace {
   tags        Tag[]
   artifacts   Artifact[]
   journalEntries JournalEntry[]
+  issues      Issue[]
   activities  Activity[]
   createdAt   DateTime          @default(now())
   updatedAt   DateTime          @updatedAt
@@ -136,6 +164,7 @@ model Project {
   tasks       Task[]
   journalContributions JournalContributionProject[]
   journalCandidates JournalCandidate[]
+  issues      Issue[]
   activities  Activity[]
   createdAt   DateTime      @default(now())
   updatedAt   DateTime      @updatedAt
@@ -167,6 +196,7 @@ model Task {
   activities      Activity[]
   tags            TaskTag[]
   artifacts       Artifact[]
+  assignedIssues  Issue[]          @relation("IssueAssignment")
   createdAt       DateTime         @default(now())
   updatedAt       DateTime         @updatedAt
   archivedAt      DateTime?
@@ -206,9 +236,11 @@ model TaskTag {
 model Artifact {
   id          String       @id @default(uuid()) @db.Uuid
   workspaceId String       @db.Uuid
-  taskId      String       @db.Uuid
+  taskId      String?      @db.Uuid
+  issueId     String?      @db.Uuid
   workspace   Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  task        Task         @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  task        Task?        @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  issue       Issue?       @relation(fields: [issueId], references: [id], onDelete: Cascade)
   kind        ArtifactKind
   title       String
   url         String?
@@ -224,6 +256,7 @@ model Artifact {
   archivedAt  DateTime?
 
   @@index([taskId, archivedAt])
+  @@index([issueId, archivedAt])
   @@index([workspaceId, createdAt(sort: Desc)])
 }
 
@@ -329,6 +362,7 @@ model JournalCandidate {
   consumedAt       DateTime?
   entry            JournalEntry         @relation(fields: [entryId], references: [id], onDelete: Cascade)
   project          Project?             @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  issues           Issue[]
   activities       Activity[]
   createdAt        DateTime             @default(now())
 
@@ -337,11 +371,49 @@ model JournalCandidate {
   @@index([authorKey, createdAt(sort: Desc)])
 }
 
+model Issue {
+  id                String            @id @default(uuid()) @db.Uuid
+  workspaceId       String            @db.Uuid
+  workspace         Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  code              String
+  kind              IssueKind         @default(BUG)
+  title             String
+  details           String?
+  status            IssueStatus       @default(OPEN)
+  severity          IssueSeverity     @default(MEDIUM)
+  closeReason       IssueCloseReason?
+  projectId         String            @db.Uuid
+  project           Project           @relation(fields: [projectId], references: [id])
+  assignedTaskId    String?           @db.Uuid
+  assignedTask      Task?             @relation("IssueAssignment", fields: [assignedTaskId], references: [id], onDelete: SetNull)
+  duplicateOfId     String?           @db.Uuid
+  duplicateOf       Issue?            @relation("IssueDuplicates", fields: [duplicateOfId], references: [id], onDelete: SetNull)
+  duplicates        Issue[]           @relation("IssueDuplicates")
+  sourceCandidateId String?           @db.Uuid
+  sourceCandidate   JournalCandidate? @relation(fields: [sourceCandidateId], references: [id], onDelete: SetNull)
+  artifacts         Artifact[]
+  activities        Activity[]
+  reportedBy        String?
+  version           Int               @default(1)
+  resolvedAt        DateTime?
+  closedAt          DateTime?
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+
+  @@unique([workspaceId, code])
+  @@index([workspaceId, status, severity])
+  @@index([projectId, status])
+  @@index([assignedTaskId])
+  @@index([sourceCandidateId])
+  @@index([duplicateOfId])
+}
+
 model Activity {
   id          String            @id @default(uuid()) @db.Uuid
   workspaceId String            @db.Uuid
   projectId   String?           @db.Uuid
   taskId      String?           @db.Uuid
+  issueId     String?           @db.Uuid
   actorUserId String?           @db.Uuid
   tagId       String?           @db.Uuid
   artifactId  String?           @db.Uuid
@@ -356,6 +428,7 @@ model Activity {
   workspace   Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   project     Project?          @relation(fields: [projectId], references: [id], onDelete: SetNull)
   task        Task?             @relation(fields: [taskId], references: [id], onDelete: SetNull)
+  issue       Issue?            @relation(fields: [issueId], references: [id], onDelete: SetNull)
   actorUser   User?             @relation("ActivityUser", fields: [actorUserId], references: [id], onDelete: SetNull)
   tag         Tag?              @relation(fields: [tagId], references: [id], onDelete: SetNull)
   artifact    Artifact?         @relation(fields: [artifactId], references: [id], onDelete: SetNull)
@@ -366,6 +439,7 @@ model Activity {
 
   @@index([workspaceId, createdAt(sort: Desc)])
   @@index([taskId, createdAt(sort: Desc)])
+  @@index([issueId, createdAt(sort: Desc)])
   @@index([tagId, createdAt(sort: Desc)])
   @@index([artifactId, createdAt(sort: Desc)])
   @@index([journalEntryId, createdAt(sort: Desc)])

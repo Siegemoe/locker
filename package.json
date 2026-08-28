@@ -23,6 +23,7 @@
     "db:seed": "tsx --env-file-if-exists=.env prisma/seed.ts",
     "db:studio": "prisma studio",
     "verify:lifecycle": "tsx --env-file-if-exists=.env scripts/verify-lifecycle.ts",
+    "verify:issues": "tsx --env-file-if-exists=.env scripts/verify-issues.ts",
     "verify:mcp": "tsx --env-file-if-exists=.env scripts/verify-mcp.ts",
     "verify:journal": "tsx --env-file-if-exists=.env scripts/verify-journal.ts",
     "verify:compose": "tsx scripts/verify-compose-flow.ts",
