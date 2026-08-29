@@ -2,6 +2,7 @@ import { Prisma, type IssueCloseReason, type IssueKind, type IssueSeverity, type
 import { randomInt } from "node:crypto";
 import { db } from "@/lib/db";
 import { ExpectedError } from "@/lib/expected-error";
+import type { ArtifactInput } from "@/lib/artifact-schema";
 import type { TaskActor } from "@/lib/task-service";
 
 // Work-order alphabet: digits and uppercase minus the lookalikes (0/O, 1/I/L).
@@ -9,16 +10,8 @@ const CODE_ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ";
 const CODE_LENGTH = 7;
 const CODE_RETRIES = 3;
 
-export type NewIssueArtifact = {
-  kind: "LINK" | "TEXT" | "FILE_METADATA";
-  title: string;
-  url?: string;
-  textContent?: string;
-  fileName?: string;
-  mimeType?: string;
-  sizeBytes?: number;
-  storageKey?: string;
-};
+/** Attachments arrive pre-validated through the shared artifact contract; storageKey is reserved for the binary-upload slice. */
+export type NewIssueArtifact = ArtifactInput & { storageKey?: string };
 
 /**
  * Lock a task row so the close gate and issue assignment cannot interleave.

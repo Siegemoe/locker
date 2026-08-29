@@ -4,7 +4,21 @@ import { registerAppResource, registerAppTool, RESOURCE_MIME_TYPE } from "@model
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import {
+  ActivityActorType, ArtifactKind, IssueCloseReason, IssueKind, IssueSeverity, IssueStatus, TaskStatus
+} from "@prisma/client";
 import { db } from "../lib/db";
+import {
+  artifactFileNameSchema, artifactMimeTypeSchema, artifactSizeBytesSchema, artifactTitleSchema, artifactUrlSchema
+} from "../lib/artifact-schema";
+import {
+  journalCandidateInputSchema, journalContributionInputSchema, journalDateSchema, journalSearchInputSchema
+} from "../lib/journal-schema";
+import {
+  issueAssignInputSchema, issueAssignSchema, issueCreateInputSchema, issueFilterInputSchema,
+  issueResolvePayloadSchema, issueReopenPayloadSchema, issueUpdateInputSchema
+} from "../lib/issue-schema";
+import { taskCreateInputSchema, taskDependencyPlanInputSchema, taskUpdateInputSchema } from "../lib/task-schema";
 import {
   approveTask, archiveTask, createTask, listTasks, replaceTaskDependencies, restoreTask,
   submitTaskCompletion, updateTask
@@ -23,27 +37,19 @@ const CARD_URI = "ui://spore-locker/task-context-v3.html";
 const cardHtml = readFileSync(fileURLToPath(new URL("./spore-card.html", import.meta.url)), "utf8");
 const aiActor = { type: "AI_TOOL" as const, label: "Spore Locker MCP" };
 
-const statusSchema = z.enum(["BACKLOG", "READY", "IN_PROGRESS", "BLOCKED", "DONE", "CANCELED"]);
-const prioritySchema = z.enum(["LOW", "MEDIUM", "HIGH", "URGENT"]);
-const journalRoleSchema = z.enum(["REFLECTION", "USER_DECISION", "AGENT_OBSERVATION", "AGENT_HYPOTHESIS", "AGENT_RECOMMENDATION", "OBJECTIVE_ACTIVITY"]);
-const journalCandidateKindSchema = z.enum(["DECISION", "REALIZATION", "MILESTONE", "DIRECTION_CHANGE", "ABANDONED_ASSUMPTION", "IDEA", "DISAGREEMENT", "FAILURE", "CHANGE_OF_MIND", "COMPLETION", "EVIDENCE"]);
 const tagSchema = z.object({ id: z.string(), name: z.string(), color: z.string().nullable() });
 const artifactSchema = z.object({
   id: z.string(), kind: z.enum(["LINK", "TEXT", "FILE_METADATA"]), title: z.string(),
   url: z.string().nullable(), textContent: z.string().nullable(), fileName: z.string().nullable(),
   mimeType: z.string().nullable(), sizeBytes: z.number().nullable()
 });
-const issueKindSchema = z.enum(["BUG", "REGRESSION", "DEBT"]);
-const issueSeveritySchema = z.enum(["CRITICAL", "HIGH", "MEDIUM", "LOW"]);
-const issueStatusSchema = z.enum(["OPEN", "TRIAGED", "RESOLVED", "CLOSED"]);
-const issueCloseReasonSchema = z.enum(["FIXED", "WONT_FIX", "DUPLICATE", "NOT_A_BUG"]);
 const issueRefSchema = z.object({
-  code: z.string(), title: z.string(), status: issueStatusSchema, severity: issueSeveritySchema
+  code: z.string(), title: z.string(), status: z.enum(IssueStatus), severity: z.enum(IssueSeverity)
 });
 const issueSchema = z.object({
-  id: z.string(), code: z.string(), kind: issueKindSchema, title: z.string(),
-  details: z.string().nullable(), status: issueStatusSchema, severity: issueSeveritySchema,
-  closeReason: issueCloseReasonSchema.nullable(),
+  id: z.string(), code: z.string(), kind: z.enum(IssueKind), title: z.string(),
+  details: z.string().nullable(), status: z.enum(IssueStatus), severity: z.enum(IssueSeverity),
+  closeReason: z.enum(IssueCloseReason).nullable(),
   project: z.object({ id: z.string(), key: z.string(), name: z.string() }),
   assignedTaskId: z.string().nullable(),
   assignedTask: z.object({ id: z.string(), title: z.string(), status: z.string() }).nullable(),
@@ -419,7 +425,7 @@ registerAppTool(server, "list_spore_tasks", {
   description: "Lists and searches active or archived tasks, optionally filtered by project, stage, or tag.",
   inputSchema: {
     archived: z.boolean().optional(), query: z.string().trim().max(200).optional(),
-    projectId: z.string().uuid().optional(), status: statusSchema.optional(), tagId: z.string().uuid().optional()
+    projectId: z.string().uuid().optional(), status: z.enum(TaskStatus).optional(), tagId: z.string().uuid().optional()
   },
   outputSchema: boardSchema,
   annotations: { readOnlyHint: true, openWorldHint: false, destructiveHint: false },
@@ -461,13 +467,7 @@ registerAppTool(server, "list_spore_workspace_structure", {
 registerAppTool(server, "capture_spore_task", {
   title: "Capture a Spore Locker task",
   description: "Captures a new task or idea in the user's local Spore Locker inbox.",
-  inputSchema: {
-    title: z.string().trim().min(1).max(200),
-    description: z.string().max(20_000).optional(),
-    priority: prioritySchema.optional(),
-    projectId: z.string().uuid().optional(),
-    tagIds: z.array(z.string().uuid()).max(20).optional()
-  },
+  inputSchema: taskCreateInputSchema.shape,
   outputSchema: boardSchema,
   annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: false },
   _meta: { ui: { visibility: ["model", "app"] } }
@@ -481,11 +481,7 @@ registerAppTool(server, "update_spore_task", {
   description: "Updates task details, priority, or work stage using optimistic versioning. Setting status DONE directly is reserved for the human UI; AI tools must record evidence with submit_spore_completion instead.",
   inputSchema: {
     id: z.string().uuid(), version: z.number().int().positive(),
-    title: z.string().trim().min(1).max(200).optional(),
-    description: z.string().max(20_000).nullable().optional(),
-    status: statusSchema.optional(), priority: prioritySchema.optional(),
-    projectId: z.string().uuid().nullable().optional(),
-    tagIds: z.array(z.string().uuid()).max(20).optional()
+    ...taskUpdateInputSchema.shape
   },
   outputSchema: boardSchema,
   annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: false },
@@ -500,9 +496,7 @@ registerAppTool(server, "plan_spore_task_dependencies", {
   description: "Replaces a task's dependency plan, rejects cross-workspace references and blocking cycles, and records the decision in activity history.",
   inputSchema: {
     id: z.string().uuid(), version: z.number().int().positive(),
-    dependencies: z.array(z.object({
-      taskId: z.string().uuid(), type: z.enum(["BLOCKS", "RELATES_TO", "DUPLICATES"])
-    })).max(100)
+    ...taskDependencyPlanInputSchema.shape
   },
   outputSchema: taskContextSchema,
   annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: false },
@@ -570,13 +564,13 @@ registerAppTool(server, "attach_spore_context", {
   description: "Attaches a safe HTTPS link, text/Markdown reference, or validated file metadata. It never uploads bytes or reads local files.",
   inputSchema: {
     taskId: z.string().uuid(),
-    kind: z.enum(["LINK", "TEXT", "FILE_METADATA"]),
-    title: z.string().trim().min(1).max(200),
-    url: z.string().url().max(2_000).optional(),
+    kind: z.enum(ArtifactKind),
+    title: artifactTitleSchema,
+    url: artifactUrlSchema.optional(),
     textContent: z.string().max(100_000).optional(),
-    fileName: z.string().max(255).optional(),
-    mimeType: z.enum(["text/plain", "text/markdown", "application/pdf", "image/png", "image/jpeg", "image/webp"]).optional(),
-    sizeBytes: z.number().int().positive().max(25 * 1024 * 1024).optional()
+    fileName: artifactFileNameSchema.optional(),
+    mimeType: artifactMimeTypeSchema.optional(),
+    sizeBytes: artifactSizeBytesSchema.optional()
   },
   outputSchema: boardSchema,
   annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: false },
@@ -597,7 +591,7 @@ registerAppTool(server, "attach_spore_workspace_reference", {
   title: "Attach a workspace path reference",
   description: "Attaches a portable workspace alias plus relative path as text context. It never resolves or reads the local path.",
   inputSchema: {
-    taskId: z.string().uuid(), title: z.string().trim().min(1).max(200),
+    taskId: z.string().uuid(), title: artifactTitleSchema,
     workspace: z.string().trim().min(1).max(80).regex(/^[A-Za-z0-9._-]+$/),
     relativePath: z.string().trim().min(1).max(1_000),
     revision: z.string().trim().max(100).optional(), note: z.string().trim().max(5_000).optional()
@@ -621,24 +615,7 @@ registerAppTool(server, "attach_spore_workspace_reference", {
 registerAppTool(server, "file_spore_issue", {
   title: "File a Spore Locker issue",
   description: "Files a work-order issue against a project with optional metadata-only attachments. Projects name the affected system; without one the issue lands in the UNASSIGNED bucket. Filing never assigns the issue to a task.",
-  inputSchema: {
-    title: z.string().trim().min(1).max(200),
-    details: z.string().max(20_000).optional(),
-    kind: issueKindSchema.optional(),
-    severity: issueSeveritySchema.optional(),
-    projectId: z.string().uuid().optional(),
-    reportedBy: z.string().trim().min(1).max(120).optional(),
-    sourceCandidateId: z.string().uuid().optional(),
-    attachments: z.array(z.object({
-      kind: z.enum(["LINK", "TEXT", "FILE_METADATA"]),
-      title: z.string().trim().min(1).max(160),
-      url: z.string().url().max(2_000).optional(),
-      textContent: z.string().max(100_000).optional(),
-      fileName: z.string().max(255).optional(),
-      mimeType: z.enum(["text/plain", "text/markdown", "application/pdf", "image/png", "image/jpeg", "image/webp"]).optional(),
-      sizeBytes: z.number().int().positive().max(25 * 1024 * 1024).optional()
-    })).max(10).optional()
-  },
+  inputSchema: issueCreateInputSchema.shape,
   outputSchema: issueContextSchema,
   annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: false },
   _meta: { ui: { visibility: ["model", "app"] } }
@@ -651,13 +628,7 @@ registerAppTool(server, "file_spore_issue", {
 registerAppTool(server, "list_spore_issues", {
   title: "List Spore Locker issues",
   description: "Lists and searches work-order issues with status, severity, kind, project, and assignment filters so agents can triage known problems.",
-  inputSchema: {
-    status: issueStatusSchema.optional(), severity: issueSeveritySchema.optional(),
-    kind: issueKindSchema.optional(), projectId: z.string().uuid().optional(),
-    assignedTaskId: z.string().uuid().optional(), unassignedOnly: z.boolean().optional(),
-    query: z.string().trim().max(200).optional(),
-    limit: z.number().int().min(1).max(200).optional()
-  },
+  inputSchema: issueFilterInputSchema.shape,
   outputSchema: issueListSchema,
   annotations: { readOnlyHint: true, openWorldHint: false, destructiveHint: false },
   _meta: { ui: { visibility: ["model"] } }
@@ -687,12 +658,7 @@ registerAppTool(server, "update_spore_issue", {
   description: "Updates an issue's title, details, kind, severity, project, or duplicate link using optimistic versioning. Status changes belong to the lifecycle tools.",
   inputSchema: {
     id: z.string().uuid(), version: z.number().int().positive(),
-    title: z.string().trim().min(1).max(200).optional(),
-    details: z.string().max(20_000).nullable().optional(),
-    kind: issueKindSchema.optional(),
-    severity: issueSeveritySchema.optional(),
-    projectId: z.string().uuid().optional(),
-    duplicateOfId: z.string().uuid().nullable().optional()
+    ...issueUpdateInputSchema.shape
   },
   outputSchema: issueContextSchema,
   annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: false },
@@ -705,22 +671,16 @@ registerAppTool(server, "update_spore_issue", {
 registerAppTool(server, "assign_spore_issue", {
   title: "Assign a Spore Locker issue to a task",
   description: "Attaches an OPEN or IN TRIAGE issue to an active task in the issue's own project, or creates a new task for it in that project. Assignment moves the issue IN TRIAGE. DONE and CANCELED tasks refuse new issues.",
-  inputSchema: {
-    id: z.string().uuid(), version: z.number().int().positive(),
-    taskId: z.string().uuid().optional(),
-    newTask: z.object({
-      title: z.string().trim().min(1).max(200),
-      description: z.string().max(20_000).optional(),
-      priority: prioritySchema.optional()
-    }).optional()
-  },
+  inputSchema: { id: z.string().uuid(), ...issueAssignInputSchema.shape },
   outputSchema: issueContextSchema,
   annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: false },
   _meta: { ui: { visibility: ["model"] } }
-}, async ({ id, version, taskId, newTask }) => {
-  if (Boolean(taskId) === Boolean(newTask)) throw new Error("Provide either taskId or newTask");
-  const payload = newTask ? { newTask } : { taskId: taskId! };
-  await assignIssue(id, version, payload, aiActor);
+}, async ({ id, ...input }) => {
+  // The xor rule lives on the shared contract; surface its message verbatim.
+  const parsed = issueAssignSchema.safeParse(input);
+  if (!parsed.success) throw new Error(parsed.error.issues[0].message);
+  const { version, taskId, newTask } = parsed.data;
+  await assignIssue(id, version, newTask ? { newTask } : { taskId: taskId! }, aiActor);
   return result(await issueResult(await workspaceId(), id), "Assigned the issue to a task; it is now IN TRIAGE.");
 });
 
@@ -729,9 +689,7 @@ registerAppTool(server, "resolve_spore_issue", {
   description: "Resolves an OPEN or IN TRIAGE issue. FIXED requires a note describing the fix and rests at RESOLVED awaiting verification; WONT_FIX, NOT_A_BUG, and DUPLICATE (with the original issue id) close outright and cascade to open duplicates.",
   inputSchema: {
     id: z.string().uuid(), version: z.number().int().positive(),
-    closeReason: issueCloseReasonSchema.optional(),
-    note: z.string().trim().max(20_000).optional(),
-    duplicateOfId: z.string().uuid().optional()
+    ...issueResolvePayloadSchema.shape
   },
   outputSchema: issueContextSchema,
   annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: false },
@@ -746,7 +704,7 @@ registerAppTool(server, "reopen_spore_issue", {
   description: "Reopens a RESOLVED or CLOSED issue with a required note explaining what came back. The assignment is cleared and the issue returns to OPEN for re-triage.",
   inputSchema: {
     id: z.string().uuid(), version: z.number().int().positive(),
-    note: z.string().trim().min(1).max(20_000)
+    ...issueReopenPayloadSchema.shape
   },
   outputSchema: issueContextSchema,
   annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: false },
@@ -759,7 +717,7 @@ registerAppTool(server, "reopen_spore_issue", {
 registerAppTool(server, "get_spore_journal_entry", {
   title: "Read a Spore Locker Journal entry",
   description: "Reads one canonical daily Journal entry with attributed agent contributions, candidate events, provenance, and a deterministic Markdown rendering. Defaults to today in the Locker timezone.",
-  inputSchema: { date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional() },
+  inputSchema: { date: journalDateSchema.optional() },
   outputSchema: { date: z.string(), entry: journalEntrySchema.nullable() },
   annotations: { readOnlyHint: true, openWorldHint: false, destructiveHint: false },
   _meta: { ui: { visibility: ["model"] } }
@@ -771,20 +729,8 @@ registerAppTool(server, "get_spore_journal_entry", {
 registerAppTool(server, "upsert_spore_journal_contribution", {
   title: "Write an attributed Journal contribution",
   description: "Creates or updates the calling agent's attributed section in a daily Journal. Updates require the current contribution version; finalized days remain immutable.",
-  inputSchema: {
-    date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
-    authorKey: z.string().trim().min(1).max(80).regex(/^[a-z0-9][a-z0-9._-]*$/i),
-    authorLabel: z.string().trim().min(1).max(120),
-    modelId: z.string().trim().max(160).nullable().optional(),
-    role: journalRoleSchema.optional(),
-    bodyMarkdown: z.string().trim().min(1).max(100_000),
-    topics: z.array(z.string().trim().min(1).max(80)).max(50).optional(),
-    importance: z.number().int().min(1).max(5).optional(),
-    sourceReferences: z.array(z.string().trim().min(1).max(2_000)).max(50).optional(),
-    projectIds: z.array(z.string().uuid()).max(50).optional(),
-    candidateIds: z.array(z.string().uuid()).max(100).optional(),
-    version: z.number().int().positive().optional()
-  },
+  // The tool defaults the date to today; the contract itself requires it.
+  inputSchema: journalContributionInputSchema.extend({ date: journalDateSchema.optional() }).shape,
   outputSchema: { entry: journalEntrySchema },
   annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: false },
   _meta: { ui: { visibility: ["model"] } }
@@ -796,18 +742,7 @@ registerAppTool(server, "upsert_spore_journal_contribution", {
 registerAppTool(server, "flag_spore_journal_candidate", {
   title: "Flag an important Journal event",
   description: "Captures a lightweight, attributed event for later daily reflection without recording the full interaction transcript.",
-  inputSchema: {
-    date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
-    authorKey: z.string().trim().min(1).max(80).regex(/^[a-z0-9][a-z0-9._-]*$/i),
-    authorLabel: z.string().trim().min(1).max(120),
-    modelId: z.string().trim().max(160).nullable().optional(),
-    kind: journalCandidateKindSchema,
-    summary: z.string().trim().min(1).max(2_000),
-    contextMarkdown: z.string().trim().max(20_000).nullable().optional(),
-    importance: z.number().int().min(1).max(5).optional(),
-    sourceReferences: z.array(z.string().trim().min(1).max(2_000)).max(50).optional(),
-    projectId: z.string().uuid().nullable().optional()
-  },
+  inputSchema: journalCandidateInputSchema.extend({ date: journalDateSchema.optional() }).shape,
   outputSchema: { entry: journalEntrySchema },
   annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: false },
   _meta: { ui: { visibility: ["model"] } }
@@ -819,16 +754,7 @@ registerAppTool(server, "flag_spore_journal_candidate", {
 registerAppTool(server, "search_spore_journal", {
   title: "Search the Spore Locker Journal",
   description: "Runs PostgreSQL full-text search across original Journal contributions and candidate passages with date, author, project, and importance filters.",
-  inputSchema: {
-    query: z.string().trim().min(1).max(500),
-    dateFrom: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
-    dateTo: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
-    authorKey: z.string().trim().max(80).optional(),
-    topic: z.string().trim().max(80).optional(),
-    projectId: z.string().uuid().optional(),
-    minImportance: z.number().int().min(1).max(5).optional(),
-    limit: z.number().int().min(1).max(100).optional()
-  },
+  inputSchema: journalSearchInputSchema.shape,
   outputSchema: { results: z.array(journalSearchSchema) },
   annotations: { readOnlyHint: true, openWorldHint: false, destructiveHint: false },
   _meta: { ui: { visibility: ["model"] } }
@@ -845,7 +771,7 @@ registerAppTool(server, "get_spore_agent_reflections", {
   description: "Returns prior attributed contributions for one stable agent identity so the agent can revisit, revise, or challenge earlier conclusions in a new dated entry.",
   inputSchema: {
     authorKey: z.string().trim().min(1).max(80),
-    before: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+    before: journalDateSchema.optional(),
     limit: z.number().int().min(1).max(100).optional()
   },
   outputSchema: { reflections: z.array(journalReflectionSchema) },
@@ -894,7 +820,7 @@ registerAppTool(server, "list_spore_activity", {
   description: "Reads the append-only activity history with optional task, project, tag, actor, action-family, and time filters.",
   inputSchema: {
     projectId: z.string().uuid().optional(), tagId: z.string().uuid().optional(),
-    actorType: z.enum(["USER", "AI_TOOL", "SYSTEM"]).optional(),
+    actorType: z.enum(ActivityActorType).optional(),
     action: z.string().trim().max(80).optional(), taskId: z.string().uuid().optional(),
     since: z.string().datetime().optional(), limit: z.number().int().min(1).max(500).optional()
   },

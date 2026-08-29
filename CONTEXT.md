@@ -47,6 +47,11 @@ name; don't invent synonyms.
   (MCP). Anything else is a plain `Error` — a bug or a race — and surfaces as
   500. The classification is made at the throw site, never re-derived from the
   message.
+- **Input contract** — a zod schema in `src/lib/*-schema.ts` beside its service,
+  defining what an operation accepts. Both the HTTP routes and the MCP tools
+  parse through it (transport framing — ids in URLs, action discriminators,
+  query-string coercion — stays in the adapter), and enums derive from the
+  Prisma client so the vocabulary cannot drift from the database.
 - **Adapter** — one of the four ways into the services: the React UI, the HTTP
   routes, the MCP tools, and the verify scripts. Adapters validate input and
   translate errors; they never implement domain rules.

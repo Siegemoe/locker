@@ -2,17 +2,10 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { actorFromRequest } from "@/lib/auth";
 import { apiError } from "@/lib/http";
+import { taskUpdateInputSchema } from "@/lib/task-schema";
 import { approveTask, archiveTask, restoreTask, updateTask } from "@/lib/task-service";
 
-const updateSchema = z.object({
-  version: z.number().int().positive(),
-  title: z.string().trim().min(1).max(200).optional(),
-  description: z.string().max(20_000).nullable().optional(),
-  projectId: z.string().uuid().nullable().optional(),
-  status: z.enum(["BACKLOG", "READY", "IN_PROGRESS", "BLOCKED", "DONE", "CANCELED"]).optional(),
-  priority: z.enum(["LOW", "MEDIUM", "HIGH", "URGENT"]).optional()
-  ,tagIds: z.array(z.string().uuid()).max(20).optional()
-});
+const updateSchema = taskUpdateInputSchema.extend({ version: z.number().int().positive() });
 
 const actionSchema = z.object({
   version: z.number().int().positive(),

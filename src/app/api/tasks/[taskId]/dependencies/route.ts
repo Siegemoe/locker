@@ -2,15 +2,10 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { actorFromRequest } from "@/lib/auth";
 import { apiError } from "@/lib/http";
+import { taskDependencyPlanInputSchema } from "@/lib/task-schema";
 import { replaceTaskDependencies } from "@/lib/task-service";
 
-const dependencyPlanSchema = z.object({
-  version: z.number().int().positive(),
-  dependencies: z.array(z.object({
-    taskId: z.string().uuid(),
-    type: z.enum(["BLOCKS", "RELATES_TO", "DUPLICATES"])
-  })).max(100)
-});
+const dependencyPlanSchema = taskDependencyPlanInputSchema.extend({ version: z.number().int().positive() });
 
 export async function PUT(
   request: NextRequest,

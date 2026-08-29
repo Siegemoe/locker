@@ -1,5 +1,6 @@
 "use client";
 
+import { IssueKind, IssueSeverity, IssueStatus } from "@prisma/client";
 import { useEffect, useMemo, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -21,9 +22,10 @@ type Issue = {
   artifacts: IssueArtifact[]; activities: Activity[];
 };
 
-const statuses = ["OPEN", "TRIAGED", "RESOLVED", "CLOSED"] as const;
-const severities = ["CRITICAL", "HIGH", "MEDIUM", "LOW"] as const;
-const kinds = ["BUG", "REGRESSION", "DEBT"] as const;
+// Vocabularies come from the Prisma client, the same source the contracts use.
+const statuses = Object.values(IssueStatus);
+const severities = Object.values(IssueSeverity);
+const kinds = Object.values(IssueKind);
 const numberFormatter = new Intl.NumberFormat("en-US");
 const timeFormatter = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 
