@@ -1,5 +1,6 @@
 import type { ActivityActorType, DependencyType, TaskPriority, TaskStatus } from "@prisma/client";
 import { db } from "@/lib/db";
+import { ExpectedError } from "@/lib/expected-error";
 import { assertNoOpenIssues, lockTaskRow } from "@/lib/issue-service";
 
 export type TaskActor = { type: ActivityActorType; label: string };
@@ -37,19 +38,19 @@ export async function replaceTaskDependencies(
       where: { id },
       include: { dependencies: { orderBy: { createdAt: "asc" } } }
     });
-    if (current.archivedAt) throw new Error("Restore this task before changing its plan");
-    if (current.version !== version) throw new Error("Task changed since it was loaded");
+    if (current.archivedAt) throw new ExpectedError("Restore this task before changing its plan");
+    if (current.version !== version) throw new ExpectedError("Task changed since it was loaded");
 
     const unique = new Map(dependencies.map((item) => [`${item.taskId}:${item.type}`, item]));
-    if (unique.size !== dependencies.length) throw new Error("Duplicate task dependencies are not allowed");
-    if (dependencies.some((item) => item.taskId === id)) throw new Error("A task cannot depend on itself");
+    if (unique.size !== dependencies.length) throw new ExpectedError("Duplicate task dependencies are not allowed");
+    if (dependencies.some((item) => item.taskId === id)) throw new ExpectedError("A task cannot depend on itself");
 
     const targetIds = [...new Set(dependencies.map((item) => item.taskId))];
     const targets = targetIds.length
       ? await tx.task.findMany({ where: { id: { in: targetIds }, workspaceId: current.workspaceId, archivedAt: null } })
       : [];
     if (targets.length !== targetIds.length) {
-      throw new Error("Dependencies must reference active tasks in the same workspace");
+      throw new ExpectedError("Dependencies must reference active tasks in the same workspace");
     }
 
     const blockingEdges = await tx.taskDependency.findMany({
@@ -76,14 +77,14 @@ export async function replaceTaskDependencies(
       return false;
     };
     if (dependencies.some((item) => item.type === "BLOCKS" && reachesTask(item.taskId))) {
-      throw new Error("Blocking dependencies cannot create a cycle");
+      throw new ExpectedError("Blocking dependencies cannot create a cycle");
     }
 
     const updated = await tx.task.updateMany({
       where: { id, version, archivedAt: null },
       data: { version: { increment: 1 } }
     });
-    if (updated.count !== 1) throw new Error("Task changed since it was loaded");
+    if (updated.count !== 1) throw new ExpectedError("Task changed since it was loaded");
     await tx.taskDependency.deleteMany({ where: { taskId: id } });
     if (dependencies.length) {
       await tx.taskDependency.createMany({
@@ -161,9 +162,9 @@ export async function updateTask(
       where: { id },
       include: { tags: { select: { tagId: true } } }
     });
-    if (current.archivedAt) throw new Error("Restore this task before editing it");
+    if (current.archivedAt) throw new ExpectedError("Restore this task before editing it");
     if (patch.status === "DONE" && actor.type !== "USER") {
-      throw new Error("AI tools must record a completion handoff instead of marking tasks DONE directly");
+      throw new ExpectedError("AI tools must record a completion handoff instead of marking tasks DONE directly");
     }
     if (patch.status === "DONE") {
       await lockTaskRow(tx, id);
@@ -186,7 +187,7 @@ export async function updateTask(
         approvedBy: patch.status && patch.status !== "DONE" ? null : current.approvedBy
       }
     });
-    if (result.count !== 1) throw new Error("Task changed since it was loaded");
+    if (result.count !== 1) throw new ExpectedError("Task changed since it was loaded");
     if (tagIds) {
       await tx.taskTag.deleteMany({ where: { taskId: id } });
       if (tagIds.length) {
@@ -218,8 +219,8 @@ export async function submitTaskCompletion(
 ) {
   return db.$transaction(async (tx) => {
     const current = await tx.task.findUniqueOrThrow({ where: { id } });
-    if (current.archivedAt) throw new Error("Restore this task before submitting completion");
-    if (current.version !== version) throw new Error("Task changed since it was loaded");
+    if (current.archivedAt) throw new ExpectedError("Restore this task before submitting completion");
+    if (current.version !== version) throw new ExpectedError("Task changed since it was loaded");
     await lockTaskRow(tx, id);
     await assertNoOpenIssues(tx, id);
 
@@ -239,7 +240,7 @@ export async function submitTaskCompletion(
         version: { increment: 1 }
       }
     });
-    if (updated.count !== 1) throw new Error("Task changed since it was loaded");
+    if (updated.count !== 1) throw new ExpectedError("Task changed since it was loaded");
     const task = await tx.task.findUniqueOrThrow({ where: { id } });
     const artifact = await tx.artifact.create({
       data: {
@@ -268,15 +269,15 @@ async function lifecycleEvent(
 ) {
   return db.$transaction(async (tx) => {
     const current = await tx.task.findUniqueOrThrow({ where: { id } });
-    if (current.version !== version) throw new Error("Task changed since it was loaded");
+    if (current.version !== version) throw new ExpectedError("Task changed since it was loaded");
     if (action === "approve" && (current.status !== "DONE" || current.archivedAt)) {
-      throw new Error("Only a completed, active task can be approved");
+      throw new ExpectedError("Only a completed, active task can be approved");
     }
     if (action === "archive" && (!current.approvedAt || current.archivedAt)) {
-      throw new Error("A task must be approved before it can be archived");
+      throw new ExpectedError("A task must be approved before it can be archived");
     }
     if (action === "restore" && !current.archivedAt) {
-      throw new Error("Task is not archived");
+      throw new ExpectedError("Task is not archived");
     }
     if (action === "approve") {
       await lockTaskRow(tx, id);
@@ -293,7 +294,7 @@ async function lifecycleEvent(
             ? { archivedAt: now, version: { increment: 1 } }
             : { archivedAt: null, version: { increment: 1 } }
     });
-    if (result.count !== 1) throw new Error("Task changed since it was loaded");
+    if (result.count !== 1) throw new ExpectedError("Task changed since it was loaded");
     const task = await tx.task.findUniqueOrThrow({ where: { id } });
     const event = action === "approve" ? "approved" : action === "archive" ? "archived" : "restored";
     await tx.activity.create({
