@@ -5,11 +5,8 @@ import type { TaskActor } from "@/lib/actor";
 import { enforceCloseGate } from "@/lib/close-gate";
 import { listActivity, serializeActivity, serializeArtifact } from "@/lib/workspace-service";
 
-/**
- * The one include tree for task reads: every adapter and every read model
- * below sees the same relations, so a new relation is added once.
- */
-const taskInclude = {
+/** Relations required by the serialized MCP board and task-context models. */
+const taskReadInclude = {
   project: { select: { id: true, key: true, name: true } },
   tags: { include: { tag: true }, orderBy: { createdAt: "asc" } },
   artifacts: { where: { archivedAt: null }, orderBy: { createdAt: "desc" } },
@@ -24,12 +21,27 @@ const taskInclude = {
   }
 } satisfies Prisma.TaskInclude;
 
-export type TaskWithRelations = Prisma.TaskGetPayload<{ include: typeof taskInclude }>;
+/** The interactive HTTP client additionally renders each task's recent history. */
+const taskListInclude = {
+  ...taskReadInclude,
+  activities: { orderBy: { createdAt: "desc" }, take: 30 }
+} satisfies Prisma.TaskInclude;
 
+export type TaskWithRelations = Prisma.TaskGetPayload<{ include: typeof taskReadInclude }>;
+
+async function listTaskReadModels(workspaceId: string, projectId?: string, archived = false) {
+  return db.task.findMany({
+    where: { workspaceId, projectId, archivedAt: archived ? { not: null } : null },
+    include: taskReadInclude,
+    orderBy: [{ status: "asc" }, { position: "asc" }, { createdAt: "desc" }]
+  });
+}
+
+/** Raw task rows for the interactive HTTP client, including recent activity. */
 export async function listTasks(workspaceId: string, projectId?: string, archived = false) {
   return db.task.findMany({
     where: { workspaceId, projectId, archivedAt: archived ? { not: null } : null },
-    include: taskInclude,
+    include: taskListInclude,
     orderBy: [{ status: "asc" }, { position: "asc" }, { createdAt: "desc" }]
   });
 }
@@ -72,7 +84,7 @@ export function serializeTask(task: TaskWithRelations) {
 
 export async function getTaskContext(workspaceId: string, taskId: string) {
   const [task, activity] = await Promise.all([
-    db.task.findFirstOrThrow({ where: { id: taskId, workspaceId }, include: taskInclude }),
+    db.task.findFirstOrThrow({ where: { id: taskId, workspaceId }, include: taskReadInclude }),
     listActivity(workspaceId, { taskId, limit: 100 })
   ]);
   return { task: serializeTask(task), activity: activity.map(serializeActivity) };
@@ -85,7 +97,7 @@ export async function getBoard(
 ) {
   const archived = filters.archived ?? false;
   const [tasks, projects, tags] = await Promise.all([
-    listTasks(workspaceId, filters.projectId, archived),
+    listTaskReadModels(workspaceId, filters.projectId, archived),
     db.project.findMany({ where: { workspaceId, archivedAt: null }, select: { id: true, key: true, name: true }, orderBy: { name: "asc" } }),
     db.tag.findMany({ where: { workspaceId, archivedAt: null }, select: { id: true, name: true, color: true }, orderBy: { name: "asc" } })
   ]);
@@ -103,7 +115,7 @@ export async function getBoard(
 /** The dependency-aware work queue: priority-ranked slices with honest counts over the full set. */
 export async function getWorkQueue(workspaceId: string, options: { projectId?: string; limit?: number } = {}) {
   const limit = options.limit ?? 25;
-  const tasks = (await listTasks(workspaceId, options.projectId)).map(serializeTask);
+  const tasks = (await listTaskReadModels(workspaceId, options.projectId)).map(serializeTask);
   const unresolved = (task: ReturnType<typeof serializeTask>) =>
     task.dependencies.some((item) => !item.resolved);
   const priority = { URGENT: 0, HIGH: 1, MEDIUM: 2, LOW: 3 } as const;
@@ -224,10 +236,14 @@ export async function createTask(
   actor: TaskActor
 ) {
   return db.$transaction(async (tx) => {
+    if (input.status === "DONE" && actor.type !== "USER") {
+      throw new ExpectedError("AI tools must record a completion handoff instead of creating tasks as DONE");
+    }
     const { tagIds, ...taskInput } = input;
     const task = await tx.task.create({
       data: {
         ...taskInput,
+        completedAt: input.status === "DONE" ? new Date() : undefined,
         createdBy: actor.label,
         tags: tagIds?.length ? { create: tagIds.map((tagId) => ({ tagId })) } : undefined
       }
@@ -371,7 +387,7 @@ async function lifecycleEvent(
   return db.$transaction(async (tx) => {
     const current = await tx.task.findUniqueOrThrow({ where: { id } });
     if (current.version !== version) throw new ExpectedError("Task changed since it was loaded");
-    if (action === "approve" && (current.status !== "DONE" || current.archivedAt)) {
+    if (action === "approve" && (current.status !== "DONE" || !current.completedAt || current.archivedAt)) {
       throw new ExpectedError("Only a completed, active task can be approved");
     }
     if (action === "archive" && (!current.approvedAt || current.archivedAt)) {

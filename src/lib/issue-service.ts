@@ -238,6 +238,7 @@ export async function issueLifecycle(
         data: {
           status: resolved ? "RESOLVED" : "CLOSED",
           closeReason,
+          ...(closeReason === "DUPLICATE" ? { duplicateOfId: payload.duplicateOfId } : {}),
           resolvedAt: resolved ? now : null,
           closedAt: resolved ? null : now,
           version: { increment: 1 }
@@ -435,6 +436,7 @@ export async function listIssues(
     kind?: IssueKind;
     assignedTaskId?: string;
     unassignedOnly?: boolean;
+    query?: string;
     limit?: number;
   } = {}
 ) {
@@ -445,7 +447,14 @@ export async function listIssues(
       status: filters.status,
       severity: filters.severity,
       kind: filters.kind,
-      assignedTaskId: filters.unassignedOnly ? null : filters.assignedTaskId
+      assignedTaskId: filters.unassignedOnly ? null : filters.assignedTaskId,
+      OR: filters.query?.trim() ? [
+        { code: { contains: filters.query.trim(), mode: "insensitive" } },
+        { title: { contains: filters.query.trim(), mode: "insensitive" } },
+        { details: { contains: filters.query.trim(), mode: "insensitive" } },
+        { project: { key: { contains: filters.query.trim(), mode: "insensitive" } } },
+        { project: { name: { contains: filters.query.trim(), mode: "insensitive" } } }
+      ] : undefined
     },
     include: {
       project: { select: { id: true, key: true, name: true } },

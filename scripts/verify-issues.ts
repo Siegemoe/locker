@@ -109,6 +109,7 @@ async function main() {
   const closedC = await issueLifecycle(issueC.id, issueC.version, "resolve", { closeReason: "DUPLICATE", duplicateOfId: issueB.id }, actor);
   assert.equal(closedC.status, "CLOSED");
   assert.equal(closedC.closeReason, "DUPLICATE");
+  assert.equal(closedC.duplicateOfId, issueB.id);
 
   // A duplicate marked while still open cascades the original's closure.
   let issueD: Issue = await createIssue({ workspaceId: workspace.id, projectId: project.id, title: "Verification issue: same drift" }, actor);
@@ -145,6 +146,10 @@ async function main() {
   const unassigned = await listIssues(workspace.id, { unassignedOnly: true });
   assert(unassigned.some((issue) => issue.id === issueE.id));
   assert(!unassigned.some((issue) => issue.id === issueA.id));
+  const searched = await listIssues(workspace.id, { query: "submit button missing" });
+  assert(searched.some((issue) => issue.id === issueA.id));
+  const absent = await listIssues(workspace.id, { query: `not-present-${Date.now()}` });
+  assert.equal(absent.length, 0);
   const context = await issueContext(workspace.id, issueA.id);
   assert.equal(context.code, issueA.code);
   assert(context.activities.some((event) => event.action === "issue.assigned"));

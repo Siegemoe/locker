@@ -18,7 +18,7 @@ import {
   issueAssignInputSchema, issueAssignSchema, issueCreateInputSchema, issueFilterInputSchema,
   issueResolvePayloadSchema, issueReopenPayloadSchema, issueUpdateInputSchema
 } from "../lib/issue-schema";
-import { taskCreateInputSchema, taskDependencyPlanInputSchema, taskUpdateInputSchema } from "../lib/task-schema";
+import { taskCaptureInputSchema, taskDependencyPlanInputSchema, taskUpdateInputSchema } from "../lib/task-schema";
 import {
   approveTask, archiveTask, createTask, getBoard, getTaskContext, getWorkQueue,
   replaceTaskDependencies, restoreTask, submitTaskCompletion, updateTask
@@ -247,7 +247,7 @@ registerAppTool(server, "list_spore_workspace_structure", {
 registerAppTool(server, "capture_spore_task", {
   title: "Capture a Spore Locker task",
   description: "Captures a new task or idea in the user's local Spore Locker inbox.",
-  inputSchema: taskCreateInputSchema.shape,
+  inputSchema: taskCaptureInputSchema.shape,
   outputSchema: boardSchema,
   annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: false },
   _meta: { ui: { visibility: ["model", "app"] } }
@@ -412,14 +412,9 @@ registerAppTool(server, "list_spore_issues", {
   outputSchema: issueListSchema,
   annotations: { readOnlyHint: true, openWorldHint: false, destructiveHint: false },
   _meta: { ui: { visibility: ["model"] } }
-}, async ({ query, limit, ...filters }) => {
+}, async (filters) => {
   const id = await workspaceId();
-  let issues = await listIssues(id, { ...filters, limit });
-  const needle = query?.trim().toLowerCase();
-  if (needle) {
-    issues = issues.filter((issue) =>
-      [issue.code, issue.title, issue.details ?? "", issue.project.key].join(" ").toLowerCase().includes(needle));
-  }
+  const issues = await listIssues(id, filters);
   return result({ issues: issues.map(serializeIssue) }, `Listed ${issues.length} Spore Locker issues.`);
 });
 

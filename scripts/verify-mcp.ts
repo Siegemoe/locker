@@ -20,7 +20,7 @@ type ActivityList = { activity: Activity[]; limit: number; truncated: boolean };
 type WorkQueue = { actionable: Task[]; blocked: Task[]; counts: { actionable: number; blocked: number } };
 type Issue = {
   id: string; code: string; title: string; status: string; version: number;
-  closeReason: string | null; assignedTaskId: string | null;
+  closeReason: string | null; duplicateOfId: string | null; assignedTaskId: string | null;
   assignedTask: { id: string; title: string; status: string } | null;
   project: { id: string; key: string; name: string };
   artifacts: { id: string }[];
@@ -72,6 +72,9 @@ async function main() {
     "get_spore_journal_entry", "upsert_spore_journal_contribution", "flag_spore_journal_candidate",
     "search_spore_journal", "get_spore_agent_reflections", "finalize_spore_journal_entry"
   ]) assert(names.has(name), `Missing MCP tool: ${name}`);
+  const captureTool = tools.tools.find((tool) => tool.name === "capture_spore_task");
+  assert(captureTool);
+  assert(!("status" in ((captureTool.inputSchema.properties ?? {}) as Record<string, unknown>)));
 
   const resources = await client.listResources();
   const card = resources.resources.find((resource) => resource.uri === "ui://spore-locker/task-context-v3.html");
@@ -100,6 +103,21 @@ async function main() {
   if (process.env.MCP_URL) {
     console.log(`Remote MCP verified without mutation: ${tools.tools.length} tools, card resource, structure, and activity.`);
     return;
+  }
+
+  // Capture cannot smuggle a terminal state around the completion handoff.
+  const forbiddenCaptureTitle = `Forbidden MCP direct completion ${Date.now()}`;
+  const directCapture = await client.callTool({
+    name: "capture_spore_task",
+    arguments: { title: forbiddenCaptureTitle, status: "DONE" }
+  });
+  if (!directCapture.isError) {
+    const captured = (directCapture.structuredContent as Board).tasks.find(
+      (item) => item.title === forbiddenCaptureTitle
+    );
+    assert(captured);
+    verificationTaskIds.add(captured.id);
+    assert.notEqual(captured.status, "DONE");
   }
 
   const tag = initial.tags[0];
@@ -219,9 +237,12 @@ async function main() {
   });
   assert.equal(closedDuplicate.issue.status, "CLOSED");
   assert.equal(closedDuplicate.issue.closeReason, "DUPLICATE");
+  assert.equal(closedDuplicate.issue.duplicateOfId, filed.issue.id);
 
   const listed = await call<IssueList>("list_spore_issues", { query: "MCP verification", unassignedOnly: true });
   assert(listed.issues.some((issue) => issue.code === reopened.issue.code));
+  const absentIssues = await call<IssueList>("list_spore_issues", { query: `not-present-${Date.now()}` });
+  assert.equal(absentIssues.issues.length, 0);
   const issueContextLoaded = await call<IssueContext>("get_spore_issue_context", { issueId: reopened.issue.id });
   assert(issueContextLoaded.activity.some((event) => event.action === "issue.assigned"));
   const missingNote = await callError("resolve_spore_issue", {

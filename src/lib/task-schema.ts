@@ -17,6 +17,13 @@ export const taskCreateInputSchema = z.object({
 });
 export type TaskCreateInput = z.infer<typeof taskCreateInputSchema>;
 
+/**
+ * Capture is an intake operation, not a lifecycle shortcut. HTTP keeps the
+ * broader create contract for trusted local imports, while AI capture cannot
+ * choose a terminal state and must use submit_spore_completion for DONE.
+ */
+export const taskCaptureInputSchema = taskCreateInputSchema.omit({ status: true });
+
 export const taskUpdateInputSchema = z.object({
   title: z.string().trim().min(1).max(200).optional(),
   description: z.string().max(20_000).nullable().optional(),

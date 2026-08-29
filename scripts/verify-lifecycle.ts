@@ -10,9 +10,14 @@ import {
 } from "../src/lib/task-service";
 
 const actor = { type: "USER" as const, label: "Lifecycle verifier" };
+const aiActor = { type: "AI_TOOL" as const, label: "Lifecycle verifier AI" };
 
 async function main() {
   const workspace = await db.workspace.findUniqueOrThrow({ where: { slug: "spore-locker" } });
+  await assert.rejects(
+    createTask({ workspaceId: workspace.id, title: "Forbidden direct completion", status: "DONE" }, aiActor),
+    /must record a completion handoff/
+  );
   let task = await createTask({
     workspaceId: workspace.id,
     title: "Lifecycle verification item",
