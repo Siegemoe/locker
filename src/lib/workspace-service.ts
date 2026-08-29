@@ -1,5 +1,6 @@
 import type { ArtifactKind } from "@prisma/client";
 import { db } from "@/lib/db";
+import { ExpectedError } from "@/lib/expected-error";
 import type { TaskActor } from "@/lib/task-service";
 
 export async function createProject(
@@ -71,12 +72,12 @@ export async function deleteEmptyProject(id: string, actor: TaskActor) {
   return db.$transaction(async (tx) => {
     const project = await tx.project.findUniqueOrThrow({ where: { id } });
     if (project.key === "UNASSIGNED") {
-      throw new Error("The UNASSIGNED project is the default bucket for new issues and cannot be deleted");
+      throw new ExpectedError("The UNASSIGNED project is the default bucket for new issues and cannot be deleted");
     }
     const taskCount = await tx.task.count({ where: { projectId: id } });
-    if (taskCount) throw new Error("Archive this project or reassign its tasks before deleting it");
+    if (taskCount) throw new ExpectedError("Archive this project or reassign its tasks before deleting it");
     const issueCount = await tx.issue.count({ where: { projectId: id } });
-    if (issueCount) throw new Error("Archive this project or move its issues before deleting it");
+    if (issueCount) throw new ExpectedError("Archive this project or move its issues before deleting it");
     await tx.activity.create({
       data: {
         workspaceId: project.workspaceId,
@@ -145,7 +146,7 @@ export async function createArtifact(
 ) {
   return db.$transaction(async (tx) => {
     if (Boolean(input.taskId) === Boolean(input.issueId)) {
-      throw new Error("An artifact needs exactly one owner: a task or an issue");
+      throw new ExpectedError("An artifact needs exactly one owner: a task or an issue");
     }
     const task = input.taskId ? await tx.task.findUniqueOrThrow({ where: { id: input.taskId } }) : null;
     const issue = input.issueId ? await tx.issue.findUniqueOrThrow({ where: { id: input.issueId } }) : null;
@@ -169,7 +170,7 @@ export async function createArtifact(
 export async function archiveArtifact(id: string, actor: TaskActor) {
   return db.$transaction(async (tx) => {
     const current = await tx.artifact.findUniqueOrThrow({ where: { id }, include: { task: true, issue: true } });
-    if (current.archivedAt) throw new Error("Artifact is already removed from active context");
+    if (current.archivedAt) throw new ExpectedError("Artifact is already removed from active context");
     const artifact = await tx.artifact.update({
       where: { id },
       data: { archivedAt: new Date() },
