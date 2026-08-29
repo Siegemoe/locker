@@ -20,17 +20,17 @@ import {
 } from "../lib/issue-schema";
 import { taskCreateInputSchema, taskDependencyPlanInputSchema, taskUpdateInputSchema } from "../lib/task-schema";
 import {
-  approveTask, archiveTask, createTask, listTasks, replaceTaskDependencies, restoreTask,
-  submitTaskCompletion, updateTask
+  approveTask, archiveTask, createTask, getBoard, getTaskContext, getWorkQueue,
+  replaceTaskDependencies, restoreTask, submitTaskCompletion, updateTask
 } from "../lib/task-service";
-import { createArtifact, listActivity } from "../lib/workspace-service";
+import { createArtifact, getWorkspaceStructure, listActivity, serializeActivity } from "../lib/workspace-service";
 import {
-  assignIssue, createIssue, issueContext, issueLifecycle, listIssues, updateIssue
+  assignIssue, createIssue, issueContext, issueLifecycle, listIssues, serializeIssue, updateIssue
 } from "../lib/issue-service";
 import {
   finalizeJournalEntry, flagJournalCandidate, getAgentReflections, getJournalEntry,
-  journalDateString, renderJournalMarkdown, searchJournal, upsertJournalContribution,
-  type JournalEntryWithContext
+  journalDateString, searchJournal, serializeJournalContribution, serializeJournalEntry,
+  upsertJournalContribution
 } from "../lib/journal-service";
 
 const CARD_URI = "ui://spore-locker/task-context-v3.html";
@@ -146,155 +146,13 @@ async function workspaceId() {
   return (await db.workspace.findUniqueOrThrow({ where: { slug: "spore-locker" } })).id;
 }
 
-function serialize(task: Awaited<ReturnType<typeof listTasks>>[number]) {
-  const dependencyResolved = (type: string, status: string) =>
-    type !== "BLOCKS" || status === "DONE" || status === "CANCELED";
-  const dependencies = task.dependencies.map(({ type, dependsOn }) => ({
-    type, task: {
-      id: dependsOn.id, title: dependsOn.title, status: dependsOn.status,
-      archivedAt: dependsOn.archivedAt?.toISOString() ?? null
-    },
-    resolved: dependencyResolved(type, dependsOn.status)
-  }));
-  return {
-    id: task.id, title: task.title, description: task.description, status: task.status,
-    priority: task.priority, version: task.version,
-    completedAt: task.completedAt?.toISOString() ?? null,
-    approvedAt: task.approvedAt?.toISOString() ?? null, approvedBy: task.approvedBy,
-    archivedAt: task.archivedAt?.toISOString() ?? null,
-    projectKey: task.project?.key ?? null, projectId: task.project?.id ?? null,
-    tags: task.tags.map(({ tag }) => ({ id: tag.id, name: tag.name, color: tag.color })),
-    artifacts: task.artifacts.map((artifact) => ({
-      id: artifact.id, kind: artifact.kind, title: artifact.title, url: artifact.url,
-      textContent: artifact.textContent, fileName: artifact.fileName,
-      mimeType: artifact.mimeType, sizeBytes: artifact.sizeBytes
-    })),
-    assignedIssues: task.assignedIssues.map(({ code, title, status, severity }) => ({ code, title, status, severity })),
-    dependencies,
-    dependents: task.dependents.map(({ type, task: dependent }) => ({
-      type, task: {
-        id: dependent.id, title: dependent.title, status: dependent.status,
-        archivedAt: dependent.archivedAt?.toISOString() ?? null
-      },
-      resolved: dependencyResolved(type, task.status)
-    })),
-    actionable: ["READY", "IN_PROGRESS"].includes(task.status) && dependencies.every((item) => item.resolved)
-  };
-}
-
-async function board(filters: {
-  archived?: boolean; query?: string; projectId?: string; status?: string; tagId?: string;
-} = {}) {
-  const archived = filters.archived ?? false;
-  const id = await workspaceId();
-  const [tasks, projects, tags] = await Promise.all([
-    listTasks(id, filters.projectId, archived),
-    db.project.findMany({ where: { workspaceId: id, archivedAt: null }, select: { id: true, key: true, name: true }, orderBy: { name: "asc" } }),
-    db.tag.findMany({ where: { workspaceId: id, archivedAt: null }, select: { id: true, name: true, color: true }, orderBy: { name: "asc" } })
-  ]);
-  const query = filters.query?.trim().toLowerCase();
-  const filtered = tasks.filter((task) => {
-    if (filters.status && task.status !== filters.status) return false;
-    if (filters.tagId && !task.tags.some(({ tag }) => tag.id === filters.tagId)) return false;
-    if (!query) return true;
-    return [task.title, task.description ?? "", task.project?.key ?? "", task.project?.name ?? "",
-      ...task.tags.map(({ tag }) => tag.name)].join(" ").toLowerCase().includes(query);
-  });
-  return { tasks: filtered.map(serialize), archived, projects, tags };
-}
-
 function result<T extends object>(data: T, text: string) {
   return { structuredContent: data, content: [{ type: "text" as const, text }] };
-}
-
-function serializeIssue(issue: Awaited<ReturnType<typeof listIssues>>[number]) {
-  return {
-    id: issue.id, code: issue.code, kind: issue.kind, title: issue.title,
-    details: issue.details, status: issue.status, severity: issue.severity,
-    closeReason: issue.closeReason, project: issue.project,
-    assignedTaskId: issue.assignedTaskId,
-    assignedTask: issue.assignedTask
-      ? { id: issue.assignedTask.id, title: issue.assignedTask.title, status: issue.assignedTask.status }
-      : null,
-    duplicateOfId: issue.duplicateOfId,
-    duplicateOf: issue.duplicateOf
-      ? { id: issue.duplicateOf.id, code: issue.duplicateOf.code, title: issue.duplicateOf.title }
-      : null,
-    reportedBy: issue.reportedBy, version: issue.version,
-    resolvedAt: issue.resolvedAt?.toISOString() ?? null,
-    closedAt: issue.closedAt?.toISOString() ?? null,
-    createdAt: issue.createdAt.toISOString(), updatedAt: issue.updatedAt.toISOString(),
-    artifacts: issue.artifacts.map((artifact) => ({
-      id: artifact.id, kind: artifact.kind, title: artifact.title, url: artifact.url,
-      textContent: artifact.textContent, fileName: artifact.fileName,
-      mimeType: artifact.mimeType, sizeBytes: artifact.sizeBytes
-    }))
-  };
 }
 
 async function issueResult(workspaceId: string, issueId: string) {
   const context = await issueContext(workspaceId, issueId);
   return { issue: serializeIssue(context), activity: context.activities.map(serializeActivity) };
-}
-
-function serializeActivity(event: Awaited<ReturnType<typeof listActivity>>[number]) {
-  return {
-    id: event.id, action: event.action, summary: event.summary, actorType: event.actorType,
-    actorLabel: event.actorLabel, createdAt: event.createdAt.toISOString(),
-    project: event.project, task: event.task, issue: event.issue, tag: event.tag, artifact: event.artifact,
-    journalEntry: event.journalEntry ? {
-      id: event.journalEntry.id,
-      date: journalDateString(event.journalEntry.entryDate),
-      title: event.journalEntry.title
-    } : null,
-    journalContribution: event.journalContribution,
-    journalCandidate: event.journalCandidate
-  };
-}
-
-function serializeJournalEntry(entry: JournalEntryWithContext) {
-  return {
-    id: entry.id,
-    date: journalDateString(entry.entryDate),
-    title: entry.title,
-    subtitle: entry.subtitle,
-    status: entry.status,
-    version: entry.version,
-    finalizedAt: entry.finalizedAt?.toISOString() ?? null,
-    finalizedBy: entry.finalizedBy,
-    contributions: entry.contributions.map((contribution) => ({
-      id: contribution.id,
-      authorKey: contribution.authorKey,
-      authorLabel: contribution.authorLabel,
-      modelId: contribution.modelId,
-      role: contribution.role,
-      bodyMarkdown: contribution.bodyMarkdown,
-      topics: contribution.topics,
-      importance: contribution.importance,
-      sourceReferences: contribution.sourceReferences,
-      version: contribution.version,
-      projects: contribution.projects.map(({ project }) => project),
-      createdAt: contribution.createdAt.toISOString(),
-      updatedAt: contribution.updatedAt.toISOString()
-    })),
-    candidates: entry.candidates.map((candidate) => ({
-      id: candidate.id,
-      authorKey: candidate.authorKey,
-      authorLabel: candidate.authorLabel,
-      modelId: candidate.modelId,
-      kind: candidate.kind,
-      summary: candidate.summary,
-      contextMarkdown: candidate.contextMarkdown,
-      importance: candidate.importance,
-      sourceReferences: candidate.sourceReferences,
-      consumedAt: candidate.consumedAt?.toISOString() ?? null,
-      project: candidate.project,
-      createdAt: candidate.createdAt.toISOString()
-    })),
-    markdown: renderJournalMarkdown(entry),
-    createdAt: entry.createdAt.toISOString(),
-    updatedAt: entry.updatedAt.toISOString()
-  };
 }
 
 function lockerToday() {
@@ -303,84 +161,6 @@ function lockerToday() {
   }).formatToParts(new Date());
   const value = Object.fromEntries(parts.map((part) => [part.type, part.value]));
   return `${value.year}-${value.month}-${value.day}`;
-}
-
-async function taskContext(taskId: string) {
-  const id = await workspaceId();
-  const task = await db.task.findFirstOrThrow({
-    where: { id: taskId, workspaceId: id },
-    include: {
-      project: { select: { id: true, key: true, name: true } },
-      tags: { include: { tag: true }, orderBy: { createdAt: "asc" } },
-      artifacts: { where: { archivedAt: null }, orderBy: { createdAt: "desc" } },
-      assignedIssues: { orderBy: { createdAt: "asc" } },
-      dependencies: {
-        include: { dependsOn: { select: { id: true, title: true, status: true, archivedAt: true } } },
-        orderBy: { createdAt: "asc" }
-      },
-      dependents: {
-        include: { task: { select: { id: true, title: true, status: true, archivedAt: true } } },
-        orderBy: { createdAt: "asc" }
-      },
-      activities: { orderBy: { createdAt: "desc" }, take: 100 }
-    }
-  });
-  const activity = await listActivity(id, { taskId, limit: 100 });
-  return { task: serialize(task), activity: activity.map(serializeActivity) };
-}
-
-async function workQueue(projectId?: string, limit = 25) {
-  const tasks = (await listTasks(await workspaceId(), projectId)).map(serialize);
-  const unresolved = (task: (typeof tasks)[number]) => task.dependencies.some((item) => !item.resolved);
-  const priority = { URGENT: 0, HIGH: 1, MEDIUM: 2, LOW: 3 } as const;
-  const ranked = [...tasks].sort((a, b) =>
-    priority[a.priority as keyof typeof priority] - priority[b.priority as keyof typeof priority] ||
-    a.title.localeCompare(b.title)
-  );
-  const select = (predicate: (task: (typeof tasks)[number]) => boolean) => ranked.filter(predicate).slice(0, limit);
-  const actionable = select((task) => task.actionable);
-  const backlog = select((task) => task.status === "BACKLOG" && !unresolved(task));
-  const blocked = select((task) =>
-    !["DONE", "CANCELED"].includes(task.status) && (task.status === "BLOCKED" || unresolved(task)));
-  const review = select((task) => task.status === "DONE" && !task.approvedAt);
-  return {
-    actionable, backlog, blocked, review,
-    counts: {
-      actionable: tasks.filter((task) => task.actionable).length,
-      backlog: tasks.filter((task) => task.status === "BACKLOG" && !unresolved(task)).length,
-      blocked: tasks.filter((task) =>
-        !["DONE", "CANCELED"].includes(task.status) && (task.status === "BLOCKED" || unresolved(task))).length,
-      review: tasks.filter((task) => task.status === "DONE" && !task.approvedAt).length,
-      total: tasks.length
-    }
-  };
-}
-
-async function workspaceStructure(includeArchived = true) {
-  const id = await workspaceId();
-  const archivedFilter = includeArchived ? undefined : null;
-  const [projects, tags] = await Promise.all([
-    db.project.findMany({
-      where: { workspaceId: id, archivedAt: archivedFilter }, include: { _count: { select: { tasks: true } } },
-      orderBy: [{ archivedAt: "asc" }, { name: "asc" }]
-    }),
-    db.tag.findMany({
-      where: { workspaceId: id, archivedAt: archivedFilter }, include: { _count: { select: { tasks: true } } },
-      orderBy: [{ archivedAt: "asc" }, { name: "asc" }]
-    })
-  ]);
-  return {
-    projects: projects.map((project) => ({
-      id: project.id, key: project.key, name: project.name, description: project.description,
-      status: project.status, color: project.color, archivedAt: project.archivedAt?.toISOString() ?? null,
-      taskCount: project._count.tasks
-    })),
-    tags: tags.map((tag) => ({
-      id: tag.id, name: tag.name, color: tag.color, archivedAt: tag.archivedAt?.toISOString() ?? null,
-      taskCount: tag._count.tasks
-    })),
-    includeArchived
-  };
 }
 
 export function createSporeServer() {
@@ -418,7 +198,7 @@ registerAppTool(server, "open_spore_locker", {
     "openai/toolInvocation/invoking": "Opening Spore Locker…",
     "openai/toolInvocation/invoked": "Spore Locker ready"
   }
-}, async () => result(await board(), "Opened the current Spore Locker board."));
+}, async () => result(await getBoard(await workspaceId()), "Opened the current Spore Locker board."));
 
 registerAppTool(server, "list_spore_tasks", {
   title: "List Spore Locker tasks",
@@ -430,7 +210,7 @@ registerAppTool(server, "list_spore_tasks", {
   outputSchema: boardSchema,
   annotations: { readOnlyHint: true, openWorldHint: false, destructiveHint: false },
   _meta: { ui: { visibility: ["model", "app"] } }
-}, async (filters) => result(await board(filters), `Listed ${filters.archived ? "archived" : "active"} Spore Locker tasks.`));
+}, async (filters) => result(await getBoard(await workspaceId(), filters), `Listed ${filters.archived ? "archived" : "active"} Spore Locker tasks.`));
 
 registerAppTool(server, "get_spore_work_queue", {
   title: "Get the Spore Locker agent work queue",
@@ -443,7 +223,7 @@ registerAppTool(server, "get_spore_work_queue", {
   annotations: { readOnlyHint: true, openWorldHint: false, destructiveHint: false },
   _meta: { ui: { visibility: ["model"] } }
 }, async ({ projectId, limit = 25 }) =>
-  result(await workQueue(projectId, limit), "Loaded the dependency-aware Spore Locker work queue."));
+  result(await getWorkQueue(await workspaceId(), { projectId, limit }), "Loaded the dependency-aware Spore Locker work queue."));
 
 registerAppTool(server, "get_spore_task_context", {
   title: "Get complete Spore Locker task context",
@@ -452,7 +232,7 @@ registerAppTool(server, "get_spore_task_context", {
   outputSchema: taskContextSchema,
   annotations: { readOnlyHint: true, openWorldHint: false, destructiveHint: false },
   _meta: { ui: { visibility: ["model"] } }
-}, async ({ taskId }) => result(await taskContext(taskId), "Loaded the task context and recent history."));
+}, async ({ taskId }) => result(await getTaskContext(await workspaceId(), taskId), "Loaded the task context and recent history."));
 
 registerAppTool(server, "list_spore_workspace_structure", {
   title: "List Spore Locker projects and tags",
@@ -462,7 +242,7 @@ registerAppTool(server, "list_spore_workspace_structure", {
   annotations: { readOnlyHint: true, openWorldHint: false, destructiveHint: false },
   _meta: { ui: { visibility: ["model"] } }
 }, async ({ includeArchived = true }) =>
-  result(await workspaceStructure(includeArchived), "Listed Spore Locker projects and tags."));
+  result(await getWorkspaceStructure(await workspaceId(), includeArchived), "Listed Spore Locker projects and tags."));
 
 registerAppTool(server, "capture_spore_task", {
   title: "Capture a Spore Locker task",
@@ -473,7 +253,7 @@ registerAppTool(server, "capture_spore_task", {
   _meta: { ui: { visibility: ["model", "app"] } }
 }, async (input) => {
   await createTask({ workspaceId: await workspaceId(), ...input }, aiActor);
-  return result(await board(), `Captured "${input.title}" in Spore Locker.`);
+  return result(await getBoard(await workspaceId()), `Captured "${input.title}" in Spore Locker.`);
 });
 
 registerAppTool(server, "update_spore_task", {
@@ -488,7 +268,7 @@ registerAppTool(server, "update_spore_task", {
   _meta: { ui: { visibility: ["model", "app"] } }
 }, async ({ id, version, ...patch }) => {
   await updateTask(id, version, patch, aiActor);
-  return result(await board(), "Updated the Spore Locker task.");
+  return result(await getBoard(await workspaceId()), "Updated the Spore Locker task.");
 });
 
 registerAppTool(server, "plan_spore_task_dependencies", {
@@ -503,7 +283,7 @@ registerAppTool(server, "plan_spore_task_dependencies", {
   _meta: { ui: { visibility: ["model"] } }
 }, async ({ id, version, dependencies }) => {
   await replaceTaskDependencies(id, version, dependencies, aiActor);
-  return result(await taskContext(id), "Updated the task dependency plan.");
+  return result(await getTaskContext(await workspaceId(), id), "Updated the task dependency plan.");
 });
 
 registerAppTool(server, "submit_spore_completion", {
@@ -520,7 +300,7 @@ registerAppTool(server, "submit_spore_completion", {
   _meta: { ui: { visibility: ["model"] } }
 }, async ({ id, version, summary, checks, unresolved }) => {
   await submitTaskCompletion(id, version, { summary, checks, unresolved }, aiActor);
-  return result(await taskContext(id), "Recorded completion evidence. No approval was recorded.");
+  return result(await getTaskContext(await workspaceId(), id), "Recorded completion evidence. No approval was recorded.");
 });
 
 registerAppTool(server, "approve_spore_task", {
@@ -532,7 +312,7 @@ registerAppTool(server, "approve_spore_task", {
   _meta: { ui: { visibility: ["model", "app"] } }
 }, async ({ id, version }) => {
   await approveTask(id, version, aiActor);
-  return result(await taskContext(id), "Approved the completed Spore Locker task.");
+  return result(await getTaskContext(await workspaceId(), id), "Approved the completed Spore Locker task.");
 });
 
 registerAppTool(server, "archive_spore_task", {
@@ -544,7 +324,7 @@ registerAppTool(server, "archive_spore_task", {
   _meta: { ui: { visibility: ["model", "app"] } }
 }, async ({ id, version }) => {
   await archiveTask(id, version, aiActor);
-  return result(await board(), "Archived the approved Spore Locker task.");
+  return result(await getBoard(await workspaceId()), "Archived the approved Spore Locker task.");
 });
 
 registerAppTool(server, "restore_spore_task", {
@@ -556,7 +336,7 @@ registerAppTool(server, "restore_spore_task", {
   _meta: { ui: { visibility: ["model", "app"] } }
 }, async ({ id, version }) => {
   await restoreTask(id, version, aiActor);
-  return result(await board(), "Restored the Spore Locker task.");
+  return result(await getBoard(await workspaceId()), "Restored the Spore Locker task.");
 });
 
 registerAppTool(server, "attach_spore_context", {
@@ -584,7 +364,7 @@ registerAppTool(server, "attach_spore_context", {
     throw new Error("File metadata requires fileName, mimeType, and sizeBytes");
   }
   await createArtifact(input, aiActor);
-  return result(await board(), `Attached context to the Spore Locker task.`);
+  return result(await getBoard(await workspaceId()), `Attached context to the Spore Locker task.`);
 });
 
 registerAppTool(server, "attach_spore_workspace_reference", {
@@ -609,7 +389,7 @@ registerAppTool(server, "attach_spore_workspace_reference", {
     ...(revision ? [`Revision: ${revision}`] : []), ...(note ? ["", note] : [])
   ].join("\n");
   await createArtifact({ taskId, kind: "TEXT", title, textContent }, aiActor);
-  return result(await taskContext(taskId), "Attached the portable workspace reference without reading local files.");
+  return result(await getTaskContext(await workspaceId(), taskId), "Attached the portable workspace reference without reading local files.");
 });
 
 registerAppTool(server, "file_spore_issue", {
@@ -780,19 +560,7 @@ registerAppTool(server, "get_spore_agent_reflections", {
 }, async ({ authorKey, before, limit }) => {
   const contributions = await getAgentReflections(await workspaceId(), authorKey, { before, limit });
   const reflections = contributions.map((contribution) => ({
-    id: contribution.id,
-    authorKey: contribution.authorKey,
-    authorLabel: contribution.authorLabel,
-    modelId: contribution.modelId,
-    role: contribution.role,
-    bodyMarkdown: contribution.bodyMarkdown,
-    topics: contribution.topics,
-    importance: contribution.importance,
-    sourceReferences: contribution.sourceReferences,
-    version: contribution.version,
-    projects: contribution.projects.map(({ project }) => project),
-    createdAt: contribution.createdAt.toISOString(),
-    updatedAt: contribution.updatedAt.toISOString(),
+    ...serializeJournalContribution(contribution),
     entry: {
       id: contribution.entry.id,
       date: journalDateString(contribution.entry.entryDate),

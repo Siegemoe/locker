@@ -404,6 +404,62 @@ export async function searchJournal(
   `);
 }
 
+/** The wire-ready contribution shape — also the base of agent reflections. */
+export function serializeJournalContribution(contribution: {
+  id: string; authorKey: string; authorLabel: string; modelId: string | null; role: JournalRole;
+  bodyMarkdown: string; topics: string[]; importance: number; sourceReferences: Prisma.JsonValue | null;
+  version: number; projects: { project: { id: string; key: string; name: string } }[];
+  createdAt: Date; updatedAt: Date;
+}) {
+  return {
+    id: contribution.id,
+    authorKey: contribution.authorKey,
+    authorLabel: contribution.authorLabel,
+    modelId: contribution.modelId,
+    role: contribution.role,
+    bodyMarkdown: contribution.bodyMarkdown,
+    topics: contribution.topics,
+    importance: contribution.importance,
+    sourceReferences: contribution.sourceReferences,
+    version: contribution.version,
+    projects: contribution.projects.map(({ project }) => project),
+    createdAt: contribution.createdAt.toISOString(),
+    updatedAt: contribution.updatedAt.toISOString()
+  };
+}
+
+/** The wire-ready Journal entry, including its deterministic Markdown rendering. */
+export function serializeJournalEntry(entry: JournalEntryWithContext) {
+  return {
+    id: entry.id,
+    date: journalDateString(entry.entryDate),
+    title: entry.title,
+    subtitle: entry.subtitle,
+    status: entry.status,
+    version: entry.version,
+    finalizedAt: entry.finalizedAt?.toISOString() ?? null,
+    finalizedBy: entry.finalizedBy,
+    contributions: entry.contributions.map(serializeJournalContribution),
+    candidates: entry.candidates.map((candidate) => ({
+      id: candidate.id,
+      authorKey: candidate.authorKey,
+      authorLabel: candidate.authorLabel,
+      modelId: candidate.modelId,
+      kind: candidate.kind,
+      summary: candidate.summary,
+      contextMarkdown: candidate.contextMarkdown,
+      importance: candidate.importance,
+      sourceReferences: candidate.sourceReferences,
+      consumedAt: candidate.consumedAt?.toISOString() ?? null,
+      project: candidate.project,
+      createdAt: candidate.createdAt.toISOString()
+    })),
+    markdown: renderJournalMarkdown(entry),
+    createdAt: entry.createdAt.toISOString(),
+    updatedAt: entry.updatedAt.toISOString()
+  };
+}
+
 export function renderJournalMarkdown(entry: JournalEntryWithContext) {
   const lines = [
     `# ${entry.title}`,

@@ -1,7 +1,20 @@
-import type { ArtifactKind } from "@prisma/client";
+import type { ArtifactKind, Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
 import { ExpectedError } from "@/lib/expected-error";
+import { journalDateString } from "@/lib/journal-service";
 import type { TaskActor } from "@/lib/task-service";
+
+/** The artifact wire shape — the one place the 8 public fields are named. */
+export function serializeArtifact(artifact: {
+  id: string; kind: ArtifactKind; title: string; url: string | null; textContent: string | null;
+  fileName: string | null; mimeType: string | null; sizeBytes: number | null;
+}) {
+  return {
+    id: artifact.id, kind: artifact.kind, title: artifact.title, url: artifact.url,
+    textContent: artifact.textContent, fileName: artifact.fileName,
+    mimeType: artifact.mimeType, sizeBytes: artifact.sizeBytes
+  };
+}
 
 export async function createProject(
   input: { workspaceId: string; key: string; name: string; description?: string; color?: string },
@@ -189,6 +202,18 @@ export async function archiveArtifact(id: string, actor: TaskActor) {
   });
 }
 
+/** The relations an activity event carries on the wire; issue context reuses the same shape. */
+export const activityInclude = {
+  project: { select: { id: true, key: true, name: true } },
+  task: { select: { id: true, title: true } },
+  issue: { select: { id: true, code: true, title: true } },
+  tag: { select: { id: true, name: true } },
+  artifact: { select: { id: true, title: true, kind: true } },
+  journalEntry: { select: { id: true, entryDate: true, title: true } },
+  journalContribution: { select: { id: true, authorLabel: true } },
+  journalCandidate: { select: { id: true, summary: true, kind: true } }
+} satisfies Prisma.ActivityInclude;
+
 export async function listActivity(
   workspaceId: string,
   filters: {
@@ -209,17 +234,60 @@ export async function listActivity(
       taskId: filters.taskId,
       createdAt: filters.since ? { gte: filters.since } : undefined
     },
-    include: {
-      project: { select: { id: true, key: true, name: true } },
-      task: { select: { id: true, title: true } },
-      issue: { select: { id: true, code: true, title: true } },
-      tag: { select: { id: true, name: true } },
-      artifact: { select: { id: true, title: true, kind: true } },
-      journalEntry: { select: { id: true, entryDate: true, title: true } },
-      journalContribution: { select: { id: true, authorLabel: true } },
-      journalCandidate: { select: { id: true, summary: true, kind: true } }
-    },
+    include: activityInclude,
     orderBy: { createdAt: "desc" },
     take: Math.min(Math.max(filters.limit ?? 500, 1), 501)
   });
+}
+
+export function serializeActivity(event: {
+  id: string; action: string; summary: string; actorType: string; actorLabel: string; createdAt: Date;
+  project: { id: string; key: string; name: string } | null;
+  task: { id: string; title: string } | null;
+  issue: { id: string; code: string; title: string } | null;
+  tag: { id: string; name: string } | null;
+  artifact: { id: string; title: string; kind: string } | null;
+  journalEntry: { id: string; entryDate: Date; title: string } | null;
+  journalContribution: { id: string; authorLabel: string } | null;
+  journalCandidate: { id: string; summary: string; kind: string } | null;
+}) {
+  return {
+    id: event.id, action: event.action, summary: event.summary, actorType: event.actorType,
+    actorLabel: event.actorLabel, createdAt: event.createdAt.toISOString(),
+    project: event.project, task: event.task, issue: event.issue, tag: event.tag, artifact: event.artifact,
+    journalEntry: event.journalEntry ? {
+      id: event.journalEntry.id,
+      date: journalDateString(event.journalEntry.entryDate),
+      title: event.journalEntry.title
+    } : null,
+    journalContribution: event.journalContribution,
+    journalCandidate: event.journalCandidate
+  };
+}
+
+/** Projects and tags with archive state and task counts — the classification view. */
+export async function getWorkspaceStructure(workspaceId: string, includeArchived = true) {
+  const archivedFilter = includeArchived ? undefined : null;
+  const [projects, tags] = await Promise.all([
+    db.project.findMany({
+      where: { workspaceId, archivedAt: archivedFilter }, include: { _count: { select: { tasks: true } } },
+      orderBy: [{ archivedAt: "asc" }, { name: "asc" }]
+    }),
+    db.tag.findMany({
+      where: { workspaceId, archivedAt: archivedFilter }, include: { _count: { select: { tasks: true } } },
+      orderBy: [{ archivedAt: "asc" }, { name: "asc" }]
+    })
+  ]);
+  return {
+    projects: projects.map((project) => ({
+      id: project.id, key: project.key, name: project.name, description: project.description,
+      status: project.status, color: project.color, archivedAt: project.archivedAt?.toISOString() ?? null,
+      taskCount: project._count.tasks
+    })),
+    tags: tags.map((tag) => ({
+      id: tag.id, name: tag.name, color: tag.color, archivedAt: tag.archivedAt?.toISOString() ?? null,
+      taskCount: tag._count.tasks
+    })),
+    includeArchived
+  };
 }

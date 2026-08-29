@@ -1,30 +1,134 @@
-import type { ActivityActorType, DependencyType, TaskPriority, TaskStatus } from "@prisma/client";
+import { Prisma, type ActivityActorType, type DependencyType, type TaskPriority, type TaskStatus } from "@prisma/client";
 import { db } from "@/lib/db";
 import { ExpectedError } from "@/lib/expected-error";
 import { assertNoOpenIssues, lockTaskRow } from "@/lib/issue-service";
+import { listActivity, serializeActivity, serializeArtifact } from "@/lib/workspace-service";
 
 export type TaskActor = { type: ActivityActorType; label: string };
+
+/**
+ * The one include tree for task reads: every adapter and every read model
+ * below sees the same relations, so a new relation is added once.
+ */
+const taskInclude = {
+  project: { select: { id: true, key: true, name: true } },
+  tags: { include: { tag: true }, orderBy: { createdAt: "asc" } },
+  artifacts: { where: { archivedAt: null }, orderBy: { createdAt: "desc" } },
+  assignedIssues: { orderBy: { createdAt: "asc" } },
+  dependencies: {
+    include: { dependsOn: { select: { id: true, title: true, status: true, archivedAt: true } } },
+    orderBy: { createdAt: "asc" }
+  },
+  dependents: {
+    include: { task: { select: { id: true, title: true, status: true, archivedAt: true } } },
+    orderBy: { createdAt: "asc" }
+  }
+} satisfies Prisma.TaskInclude;
+
+export type TaskWithRelations = Prisma.TaskGetPayload<{ include: typeof taskInclude }>;
 
 export async function listTasks(workspaceId: string, projectId?: string, archived = false) {
   return db.task.findMany({
     where: { workspaceId, projectId, archivedAt: archived ? { not: null } : null },
-    include: {
-      project: { select: { id: true, key: true, name: true } },
-      tags: { include: { tag: true }, orderBy: { createdAt: "asc" } },
-      artifacts: { where: { archivedAt: null }, orderBy: { createdAt: "desc" } },
-      assignedIssues: { orderBy: { createdAt: "asc" } },
-      dependencies: {
-        include: { dependsOn: { select: { id: true, title: true, status: true, archivedAt: true } } },
-        orderBy: { createdAt: "asc" }
-      },
-      dependents: {
-        include: { task: { select: { id: true, title: true, status: true, archivedAt: true } } },
-        orderBy: { createdAt: "asc" }
-      },
-      activities: { orderBy: { createdAt: "desc" }, take: 30 }
-    },
+    include: taskInclude,
     orderBy: [{ status: "asc" }, { position: "asc" }, { createdAt: "desc" }]
   });
+}
+
+/**
+ * The wire-ready task shape: Dates as ISO strings, dependency resolution and
+ * the actionable flag computed here so every adapter agrees on them.
+ */
+export function serializeTask(task: TaskWithRelations) {
+  const dependencyResolved = (type: string, status: string) =>
+    type !== "BLOCKS" || status === "DONE" || status === "CANCELED";
+  const dependencies = task.dependencies.map(({ type, dependsOn }) => ({
+    type, task: {
+      id: dependsOn.id, title: dependsOn.title, status: dependsOn.status,
+      archivedAt: dependsOn.archivedAt?.toISOString() ?? null
+    },
+    resolved: dependencyResolved(type, dependsOn.status)
+  }));
+  return {
+    id: task.id, title: task.title, description: task.description, status: task.status,
+    priority: task.priority, version: task.version,
+    completedAt: task.completedAt?.toISOString() ?? null,
+    approvedAt: task.approvedAt?.toISOString() ?? null, approvedBy: task.approvedBy,
+    archivedAt: task.archivedAt?.toISOString() ?? null,
+    projectKey: task.project?.key ?? null, projectId: task.project?.id ?? null,
+    tags: task.tags.map(({ tag }) => ({ id: tag.id, name: tag.name, color: tag.color })),
+    artifacts: task.artifacts.map(serializeArtifact),
+    assignedIssues: task.assignedIssues.map(({ code, title, status, severity }) => ({ code, title, status, severity })),
+    dependencies,
+    dependents: task.dependents.map(({ type, task: dependent }) => ({
+      type, task: {
+        id: dependent.id, title: dependent.title, status: dependent.status,
+        archivedAt: dependent.archivedAt?.toISOString() ?? null
+      },
+      resolved: dependencyResolved(type, task.status)
+    })),
+    actionable: ["READY", "IN_PROGRESS"].includes(task.status) && dependencies.every((item) => item.resolved)
+  };
+}
+
+export async function getTaskContext(workspaceId: string, taskId: string) {
+  const [task, activity] = await Promise.all([
+    db.task.findFirstOrThrow({ where: { id: taskId, workspaceId }, include: taskInclude }),
+    listActivity(workspaceId, { taskId, limit: 100 })
+  ]);
+  return { task: serializeTask(task), activity: activity.map(serializeActivity) };
+}
+
+/** The board read: tasks plus the project and tag dimensions used to filter them. */
+export async function getBoard(
+  workspaceId: string,
+  filters: { archived?: boolean; query?: string; projectId?: string; status?: string; tagId?: string } = {}
+) {
+  const archived = filters.archived ?? false;
+  const [tasks, projects, tags] = await Promise.all([
+    listTasks(workspaceId, filters.projectId, archived),
+    db.project.findMany({ where: { workspaceId, archivedAt: null }, select: { id: true, key: true, name: true }, orderBy: { name: "asc" } }),
+    db.tag.findMany({ where: { workspaceId, archivedAt: null }, select: { id: true, name: true, color: true }, orderBy: { name: "asc" } })
+  ]);
+  const query = filters.query?.trim().toLowerCase();
+  const filtered = tasks.filter((task) => {
+    if (filters.status && task.status !== filters.status) return false;
+    if (filters.tagId && !task.tags.some(({ tag }) => tag.id === filters.tagId)) return false;
+    if (!query) return true;
+    return [task.title, task.description ?? "", task.project?.key ?? "", task.project?.name ?? "",
+      ...task.tags.map(({ tag }) => tag.name)].join(" ").toLowerCase().includes(query);
+  });
+  return { tasks: filtered.map(serializeTask), archived, projects, tags };
+}
+
+/** The dependency-aware work queue: priority-ranked slices with honest counts over the full set. */
+export async function getWorkQueue(workspaceId: string, options: { projectId?: string; limit?: number } = {}) {
+  const limit = options.limit ?? 25;
+  const tasks = (await listTasks(workspaceId, options.projectId)).map(serializeTask);
+  const unresolved = (task: ReturnType<typeof serializeTask>) =>
+    task.dependencies.some((item) => !item.resolved);
+  const priority = { URGENT: 0, HIGH: 1, MEDIUM: 2, LOW: 3 } as const;
+  const ranked = [...tasks].sort((a, b) =>
+    priority[a.priority as keyof typeof priority] - priority[b.priority as keyof typeof priority] ||
+    a.title.localeCompare(b.title)
+  );
+  const select = (predicate: (task: ReturnType<typeof serializeTask>) => boolean) =>
+    ranked.filter(predicate).slice(0, limit);
+  return {
+    actionable: select((task) => task.actionable),
+    backlog: select((task) => task.status === "BACKLOG" && !unresolved(task)),
+    blocked: select((task) =>
+      !["DONE", "CANCELED"].includes(task.status) && (task.status === "BLOCKED" || unresolved(task))),
+    review: select((task) => task.status === "DONE" && !task.approvedAt),
+    counts: {
+      actionable: tasks.filter((task) => task.actionable).length,
+      backlog: tasks.filter((task) => task.status === "BACKLOG" && !unresolved(task)).length,
+      blocked: tasks.filter((task) =>
+        !["DONE", "CANCELED"].includes(task.status) && (task.status === "BLOCKED" || unresolved(task))).length,
+      review: tasks.filter((task) => task.status === "DONE" && !task.approvedAt).length,
+      total: tasks.length
+    }
+  };
 }
 
 export async function replaceTaskDependencies(

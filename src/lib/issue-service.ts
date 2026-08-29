@@ -3,6 +3,7 @@ import { randomInt } from "node:crypto";
 import { db } from "@/lib/db";
 import { ExpectedError } from "@/lib/expected-error";
 import type { ArtifactInput } from "@/lib/artifact-schema";
+import { activityInclude, serializeArtifact } from "@/lib/workspace-service";
 import type { TaskActor } from "@/lib/task-service";
 
 // Work-order alphabet: digits and uppercase minus the lookalikes (0/O, 1/I/L).
@@ -480,6 +481,28 @@ export async function listIssues(
   });
 }
 
+/** The wire-ready issue shape, shared by every adapter that renders issues. */
+export function serializeIssue(issue: Awaited<ReturnType<typeof listIssues>>[number]) {
+  return {
+    id: issue.id, code: issue.code, kind: issue.kind, title: issue.title,
+    details: issue.details, status: issue.status, severity: issue.severity,
+    closeReason: issue.closeReason, project: issue.project,
+    assignedTaskId: issue.assignedTaskId,
+    assignedTask: issue.assignedTask
+      ? { id: issue.assignedTask.id, title: issue.assignedTask.title, status: issue.assignedTask.status }
+      : null,
+    duplicateOfId: issue.duplicateOfId,
+    duplicateOf: issue.duplicateOf
+      ? { id: issue.duplicateOf.id, code: issue.duplicateOf.code, title: issue.duplicateOf.title }
+      : null,
+    reportedBy: issue.reportedBy, version: issue.version,
+    resolvedAt: issue.resolvedAt?.toISOString() ?? null,
+    closedAt: issue.closedAt?.toISOString() ?? null,
+    createdAt: issue.createdAt.toISOString(), updatedAt: issue.updatedAt.toISOString(),
+    artifacts: issue.artifacts.map(serializeArtifact)
+  };
+}
+
 export async function issueContext(workspaceId: string, id: string) {
   return db.issue.findFirstOrThrow({
     where: { id, workspaceId },
@@ -490,19 +513,7 @@ export async function issueContext(workspaceId: string, id: string) {
       duplicates: { select: { id: true, code: true, title: true, status: true } },
       sourceCandidate: { select: { id: true, kind: true, summary: true } },
       artifacts: { where: { archivedAt: null }, orderBy: { createdAt: "desc" } },
-      activities: {
-        orderBy: { createdAt: "desc" }, take: 50,
-        include: {
-          project: { select: { id: true, key: true, name: true } },
-          task: { select: { id: true, title: true } },
-          issue: { select: { id: true, code: true, title: true } },
-          tag: { select: { id: true, name: true } },
-          artifact: { select: { id: true, title: true, kind: true } },
-          journalEntry: { select: { id: true, entryDate: true, title: true } },
-          journalContribution: { select: { id: true, authorLabel: true } },
-          journalCandidate: { select: { id: true, summary: true, kind: true } }
-        }
-      }
+      activities: { orderBy: { createdAt: "desc" }, take: 50, include: activityInclude }
     }
   });
 }
