@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { ZodError } from "zod";
+import { ExpectedError } from "@/lib/expected-error";
 
 export function apiError(error: unknown) {
   if (error instanceof ZodError) {
@@ -7,6 +8,9 @@ export function apiError(error: unknown) {
       { error: "Invalid request", details: error.flatten() },
       { status: 400 }
     );
+  }
+  if (error instanceof ExpectedError) {
+    return NextResponse.json({ error: error.message }, { status: 409 });
   }
   if (error instanceof Error) {
     const expected = [

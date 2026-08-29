@@ -1,6 +1,7 @@
 import { Prisma, type IssueCloseReason, type IssueKind, type IssueSeverity, type IssueStatus, type TaskPriority } from "@prisma/client";
 import { randomInt } from "node:crypto";
 import { db } from "@/lib/db";
+import { ExpectedError } from "@/lib/expected-error";
 import type { TaskActor } from "@/lib/task-service";
 
 // Work-order alphabet: digits and uppercase minus the lookalikes (0/O, 1/I/L).
@@ -39,7 +40,7 @@ export async function assertNoOpenIssues(tx: Prisma.TransactionClient, taskId: s
   if (!blocking.length) return;
   const shown = blocking.slice(0, 5).map((issue) => `${issue.code} "${issue.title}"`).join(", ");
   const extra = blocking.length > 5 ? ` and ${blocking.length - 5} more` : "";
-  throw new Error(`Resolve attached issues before completing this task: ${shown}${extra}`);
+  throw new ExpectedError(`Resolve attached issues before completing this task: ${shown}${extra}`);
 }
 
 function randomCode() {
@@ -83,13 +84,13 @@ export async function createIssue(
             where: { id: projectId, workspaceId: input.workspaceId },
             select: { id: true }
           });
-          if (!project) throw new Error("Project must belong to the same workspace as the issue");
+          if (!project) throw new ExpectedError("Project must belong to the same workspace as the issue");
         } else {
           const bucket = await tx.project.findFirst({
             where: { workspaceId: input.workspaceId, key: "UNASSIGNED", archivedAt: null },
             select: { id: true }
           });
-          if (!bucket) throw new Error("No UNASSIGNED project exists in this workspace; create one or name a project");
+          if (!bucket) throw new ExpectedError("No UNASSIGNED project exists in this workspace; create one or name a project");
           projectId = bucket.id;
         }
         if (input.sourceCandidateId) {
@@ -97,7 +98,7 @@ export async function createIssue(
             where: { id: input.sourceCandidateId, entry: { workspaceId: input.workspaceId } },
             select: { id: true }
           });
-          if (!candidate) throw new Error("Journal candidate must belong to the same workspace as the issue");
+          if (!candidate) throw new ExpectedError("Journal candidate must belong to the same workspace as the issue");
         }
 
         const issue = await tx.issue.create({
@@ -162,32 +163,32 @@ export async function updateIssue(
 ) {
   return db.$transaction(async (tx) => {
     const current = await tx.issue.findUniqueOrThrow({ where: { id } });
-    if (current.status === "CLOSED") throw new Error("Reopen this issue before editing it");
+    if (current.status === "CLOSED") throw new ExpectedError("Reopen this issue before editing it");
     if (patch.projectId && patch.projectId !== current.projectId && current.assignedTaskId) {
-      throw new Error("Reassign this issue before moving it to another project");
+      throw new ExpectedError("Reassign this issue before moving it to another project");
     }
     if (patch.projectId) {
       const project = await tx.project.findFirst({
         where: { id: patch.projectId, workspaceId: current.workspaceId },
         select: { id: true }
       });
-      if (!project) throw new Error("Project must belong to the same workspace as the issue");
+      if (!project) throw new ExpectedError("Project must belong to the same workspace as the issue");
     }
     if (patch.duplicateOfId) {
-      if (patch.duplicateOfId === id) throw new Error("An issue cannot be a duplicate of itself");
+      if (patch.duplicateOfId === id) throw new ExpectedError("An issue cannot be a duplicate of itself");
       const original = await tx.issue.findFirst({
         where: { id: patch.duplicateOfId, workspaceId: current.workspaceId },
         select: { id: true, duplicateOfId: true }
       });
-      if (!original) throw new Error("Duplicate target must be an issue in the same workspace");
-      if (original.duplicateOfId === id) throw new Error("Issues cannot be duplicates of each other");
+      if (!original) throw new ExpectedError("Duplicate target must be an issue in the same workspace");
+      if (original.duplicateOfId === id) throw new ExpectedError("Issues cannot be duplicates of each other");
     }
 
     const result = await tx.issue.updateMany({
       where: { id, version },
       data: { ...patch, version: { increment: 1 } }
     });
-    if (result.count !== 1) throw new Error("Issue changed since it was loaded");
+    if (result.count !== 1) throw new ExpectedError("Issue changed since it was loaded");
     const issue = await tx.issue.findUniqueOrThrow({ where: { id } });
     await tx.activity.create({
       data: {
@@ -222,12 +223,12 @@ export async function issueLifecycle(
     const now = new Date();
 
     if (action === "triage") {
-      if (current.status !== "OPEN") throw new Error("Only an OPEN issue can move to triage");
+      if (current.status !== "OPEN") throw new ExpectedError("Only an OPEN issue can move to triage");
       const result = await tx.issue.updateMany({
         where: { id, version },
         data: { status: "TRIAGED", severity: payload.severity, version: { increment: 1 } }
       });
-      if (result.count !== 1) throw new Error("Issue changed since it was loaded");
+      if (result.count !== 1) throw new ExpectedError("Issue changed since it was loaded");
       const issue = await tx.issue.findUniqueOrThrow({ where: { id } });
       await tx.activity.create({
         data: {
@@ -243,21 +244,21 @@ export async function issueLifecycle(
 
     if (action === "resolve") {
       if (current.status !== "OPEN" && current.status !== "TRIAGED") {
-        throw new Error("Only an OPEN or IN TRIAGE issue can be resolved");
+        throw new ExpectedError("Only an OPEN or IN TRIAGE issue can be resolved");
       }
       const closeReason = payload.closeReason ?? "FIXED";
       if (closeReason === "FIXED" && !payload.note?.trim()) {
-        throw new Error("Resolving as FIXED requires a note describing the fix");
+        throw new ExpectedError("Resolving as FIXED requires a note describing the fix");
       }
       if (closeReason === "DUPLICATE") {
-        if (!payload.duplicateOfId) throw new Error("Resolving as DUPLICATE requires the original issue");
-        if (payload.duplicateOfId === id) throw new Error("An issue cannot be a duplicate of itself");
+        if (!payload.duplicateOfId) throw new ExpectedError("Resolving as DUPLICATE requires the original issue");
+        if (payload.duplicateOfId === id) throw new ExpectedError("An issue cannot be a duplicate of itself");
         const original = await tx.issue.findFirst({
           where: { id: payload.duplicateOfId, workspaceId: current.workspaceId },
           select: { id: true, duplicateOfId: true }
         });
-        if (!original) throw new Error("Duplicate target must be an issue in the same workspace");
-        if (original.duplicateOfId === id) throw new Error("Issues cannot be duplicates of each other");
+        if (!original) throw new ExpectedError("Duplicate target must be an issue in the same workspace");
+        if (original.duplicateOfId === id) throw new ExpectedError("Issues cannot be duplicates of each other");
       }
       const resolved = closeReason === "FIXED";
       const result = await tx.issue.updateMany({
@@ -270,7 +271,7 @@ export async function issueLifecycle(
           version: { increment: 1 }
         }
       });
-      if (result.count !== 1) throw new Error("Issue changed since it was loaded");
+      if (result.count !== 1) throw new ExpectedError("Issue changed since it was loaded");
       const issue = await tx.issue.findUniqueOrThrow({ where: { id } });
       await tx.activity.create({
         data: {
@@ -291,12 +292,12 @@ export async function issueLifecycle(
     }
 
     if (action === "verify") {
-      if (current.status !== "RESOLVED") throw new Error("Only a RESOLVED issue can be verified closed");
+      if (current.status !== "RESOLVED") throw new ExpectedError("Only a RESOLVED issue can be verified closed");
       const result = await tx.issue.updateMany({
         where: { id, version },
         data: { status: "CLOSED", closedAt: now, version: { increment: 1 } }
       });
-      if (result.count !== 1) throw new Error("Issue changed since it was loaded");
+      if (result.count !== 1) throw new ExpectedError("Issue changed since it was loaded");
       const issue = await tx.issue.findUniqueOrThrow({ where: { id } });
       await tx.activity.create({
         data: {
@@ -313,9 +314,9 @@ export async function issueLifecycle(
 
     // reopen
     if (current.status !== "RESOLVED" && current.status !== "CLOSED") {
-      throw new Error("Only a RESOLVED or CLOSED issue can be reopened");
+      throw new ExpectedError("Only a RESOLVED or CLOSED issue can be reopened");
     }
-    if (!payload.note?.trim()) throw new Error("Reopening an issue requires a note explaining what came back");
+    if (!payload.note?.trim()) throw new ExpectedError("Reopening an issue requires a note explaining what came back");
     const result = await tx.issue.updateMany({
       where: { id, version },
       data: {
@@ -327,7 +328,7 @@ export async function issueLifecycle(
         version: { increment: 1 }
       }
     });
-    if (result.count !== 1) throw new Error("Issue changed since it was loaded");
+    if (result.count !== 1) throw new ExpectedError("Issue changed since it was loaded");
     const issue = await tx.issue.findUniqueOrThrow({ where: { id } });
     await tx.activity.create({
       data: {
@@ -384,7 +385,7 @@ export async function assignIssue(
   return db.$transaction(async (tx) => {
     const issue = await tx.issue.findUniqueOrThrow({ where: { id } });
     if (issue.status !== "OPEN" && issue.status !== "TRIAGED") {
-      throw new Error("Reopen this issue before assigning it to a task");
+      throw new ExpectedError("Reopen this issue before assigning it to a task");
     }
 
     let taskId: string;
@@ -412,27 +413,27 @@ export async function assignIssue(
     } else {
       taskId = payload.taskId;
     }
-    if (issue.assignedTaskId === taskId) throw new Error("Issue is already assigned to this task");
+    if (issue.assignedTaskId === taskId) throw new ExpectedError("Issue is already assigned to this task");
 
     // Lock before validating task state so a concurrent completion cannot
     // interleave between the check and the attach.
     await lockTaskRow(tx, taskId);
     const task = await tx.task.findUnique({ where: { id: taskId } });
     if (!task || task.workspaceId !== issue.workspaceId || task.archivedAt) {
-      throw new Error("Task must be an active task in the same workspace as the issue");
+      throw new ExpectedError("Task must be an active task in the same workspace as the issue");
     }
     if (task.status === "DONE" || task.status === "CANCELED") {
-      throw new Error("Issues cannot attach to a DONE or CANCELED task");
+      throw new ExpectedError("Issues cannot attach to a DONE or CANCELED task");
     }
     if (task.projectId !== issue.projectId) {
-      throw new Error("Attach this issue to a task in its own project, or assign it to a new task");
+      throw new ExpectedError("Attach this issue to a task in its own project, or assign it to a new task");
     }
 
     const result = await tx.issue.updateMany({
       where: { id: issue.id, version },
       data: { assignedTaskId: taskId, status: "TRIAGED", version: { increment: 1 } }
     });
-    if (result.count !== 1) throw new Error("Issue changed since it was loaded");
+    if (result.count !== 1) throw new ExpectedError("Issue changed since it was loaded");
     await tx.activity.create({
       data: {
         workspaceId: issue.workspaceId, projectId: issue.projectId, issueId: issue.id, taskId,
