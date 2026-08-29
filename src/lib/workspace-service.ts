@@ -2,7 +2,7 @@ import type { ArtifactKind, Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
 import { ExpectedError } from "@/lib/expected-error";
 import { journalDateString } from "@/lib/journal-service";
-import type { TaskActor } from "@/lib/task-service";
+import type { TaskActor } from "@/lib/actor";
 
 /** The artifact wire shape — the one place the 8 public fields are named. */
 export function serializeArtifact(artifact: {

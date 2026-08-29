@@ -1,10 +1,9 @@
-import { Prisma, type ActivityActorType, type DependencyType, type TaskPriority, type TaskStatus } from "@prisma/client";
+import { Prisma, type DependencyType, type TaskPriority, type TaskStatus } from "@prisma/client";
 import { db } from "@/lib/db";
 import { ExpectedError } from "@/lib/expected-error";
-import { assertNoOpenIssues, lockTaskRow } from "@/lib/issue-service";
+import type { TaskActor } from "@/lib/actor";
+import { enforceCloseGate } from "@/lib/close-gate";
 import { listActivity, serializeActivity, serializeArtifact } from "@/lib/workspace-service";
-
-export type TaskActor = { type: ActivityActorType; label: string };
 
 /**
  * The one include tree for task reads: every adapter and every read model
@@ -271,8 +270,7 @@ export async function updateTask(
       throw new ExpectedError("AI tools must record a completion handoff instead of marking tasks DONE directly");
     }
     if (patch.status === "DONE") {
-      await lockTaskRow(tx, id);
-      await assertNoOpenIssues(tx, id);
+      await enforceCloseGate(tx, id);
     }
     const { tagIds, ...taskPatch } = patch;
     const result = await tx.task.updateMany({
@@ -325,8 +323,7 @@ export async function submitTaskCompletion(
     const current = await tx.task.findUniqueOrThrow({ where: { id } });
     if (current.archivedAt) throw new ExpectedError("Restore this task before submitting completion");
     if (current.version !== version) throw new ExpectedError("Task changed since it was loaded");
-    await lockTaskRow(tx, id);
-    await assertNoOpenIssues(tx, id);
+    await enforceCloseGate(tx, id);
 
     const checks = input.checks ?? [];
     const unresolved = input.unresolved ?? [];
@@ -384,8 +381,7 @@ async function lifecycleEvent(
       throw new ExpectedError("Task is not archived");
     }
     if (action === "approve") {
-      await lockTaskRow(tx, id);
-      await assertNoOpenIssues(tx, id);
+      await enforceCloseGate(tx, id);
     }
 
     const now = new Date();

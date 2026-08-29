@@ -36,7 +36,9 @@ name; don't invent synonyms.
   trail is the product's core promise; it is never edited or deleted.
 - **Actor** — who did it: `USER` (the human, via the app UI) or `AI_TOOL` (an
   agent, via MCP or a token-authenticated API call). Attribution is
-  trusted-local; see SECURITY.md.
+  trusted-local; see SECURITY.md. The service-side actor type is `TaskActor`
+  in `src/lib/actor.ts`; the request-bound counterpart in `auth.ts` can never
+  be `SYSTEM`.
 
 ## Module vocabulary
 
@@ -58,3 +60,8 @@ name; don't invent synonyms.
 - **Service module** — `src/lib/*-service.ts`. Owns its entity's rules,
   transactions, Activity pairing, and read models. The only place domain logic
   lives.
+- **Close gate module** — `src/lib/close-gate.ts`. Neutral ground between the
+  gate's two contenders — completion (task-service) and issue assignment
+  (issue-service). Owns the row lock, the check, and the ordering:
+  `enforceCloseGate` always locks the task row before checking, so neither
+  path can slip past the other regardless of arrival order.

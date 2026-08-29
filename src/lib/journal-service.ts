@@ -1,7 +1,7 @@
 import { Prisma, type JournalCandidateKind, type JournalRole } from "@prisma/client";
 import { db } from "@/lib/db";
 import { ExpectedError } from "@/lib/expected-error";
-import type { TaskActor } from "@/lib/task-service";
+import type { TaskActor } from "@/lib/actor";
 
 const entryInclude = {
   contributions: {

@@ -2,9 +2,10 @@ import { Prisma, type IssueCloseReason, type IssueKind, type IssueSeverity, type
 import { randomInt } from "node:crypto";
 import { db } from "@/lib/db";
 import { ExpectedError } from "@/lib/expected-error";
+import type { TaskActor } from "@/lib/actor";
 import type { ArtifactInput } from "@/lib/artifact-schema";
+import { lockTaskRow } from "@/lib/close-gate";
 import { activityInclude, serializeArtifact } from "@/lib/workspace-service";
-import type { TaskActor } from "@/lib/task-service";
 
 // Work-order alphabet: digits and uppercase minus the lookalikes (0/O, 1/I/L).
 const CODE_ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ";
@@ -13,29 +14,6 @@ const CODE_RETRIES = 3;
 
 /** Attachments arrive pre-validated through the shared artifact contract; storageKey is reserved for the binary-upload slice. */
 export type NewIssueArtifact = ArtifactInput & { storageKey?: string };
-
-/**
- * Lock a task row so the close gate and issue assignment cannot interleave.
- * Both paths take this lock before validating, so neither can slip past the
- * other's check regardless of arrival order. Lives here because assignment
- * (this module) and the close gate (task-service) are the two contenders.
- */
-export async function lockTaskRow(tx: Prisma.TransactionClient, taskId: string) {
-  await tx.$queryRaw`SELECT id FROM "Task" WHERE id = CAST(${taskId} AS uuid) FOR UPDATE`;
-}
-
-/** The close gate: no task completes while issues attached to it are OPEN or IN TRIAGE. */
-export async function assertNoOpenIssues(tx: Prisma.TransactionClient, taskId: string) {
-  const blocking = await tx.issue.findMany({
-    where: { assignedTaskId: taskId, status: { in: ["OPEN", "TRIAGED"] } },
-    select: { code: true, title: true },
-    orderBy: { code: "asc" }
-  });
-  if (!blocking.length) return;
-  const shown = blocking.slice(0, 5).map((issue) => `${issue.code} "${issue.title}"`).join(", ");
-  const extra = blocking.length > 5 ? ` and ${blocking.length - 5} more` : "";
-  throw new ExpectedError(`Resolve attached issues before completing this task: ${shown}${extra}`);
-}
 
 function randomCode() {
   let code = "";
