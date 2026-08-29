@@ -1,161 +1,13 @@
 "use client";
 
-import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import ReactMarkdown, { type Components } from "react-markdown";
-import remarkGfm from "remark-gfm";
+import { FormEvent, useCallback, useMemo, useRef, useState } from "react";
 import Journal from "./journal";
 import Issues from "./issues";
-
-type Activity = { id: string; actorType: string; actorLabel: string; action: string; summary: string; createdAt: string };
-type Project = { id: string; key: string; name: string; description: string | null; color: string | null; status: string; archivedAt: string | null };
-type Tag = { id: string; name: string; color: string | null; archivedAt?: string | null };
-type Artifact = { id: string; kind: "LINK" | "TEXT" | "FILE_METADATA"; title: string; url: string | null; textContent: string | null; fileName: string | null; mimeType: string | null; sizeBytes: number | null };
-type Task = {
-  id: string; title: string; description: string | null; status: string; priority: string;
-  createdBy: string | null; version: number; createdAt: string; updatedAt: string;
-  completedAt: string | null; approvedAt: string | null; approvedBy: string | null;
-  archivedAt: string | null; project: { id: string; key: string; name: string } | null; activities: Activity[];
-  tags: { tag: Tag }[]; artifacts: Artifact[];
-};
-type WorkspaceData = { id: string; name: string; projects: Project[]; tags: Tag[]; tasks: Task[] };
-type WorkspaceActivity = Activity & {
-  project: { id: string; key: string; name: string } | null;
-  task: { id: string; title: string } | null;
-  tag: { id: string; name: string } | null;
-  artifact: { id: string; title: string; kind: string } | null;
-  journalEntry: { id: string; entryDate: string; title: string } | null;
-  journalContribution: { id: string; authorLabel: string } | null;
-  journalCandidate: { id: string; summary: string; kind: string } | null;
-};
-type GroupKey = "status" | "classification" | "project" | "none";
-type DialogMode = "detail" | "edit";
-type DescriptionSection = { id: string; title: string; level: number; body: string };
-
-const stages = [
-  ["BACKLOG", "Inbox"], ["READY", "Ready"], ["IN_PROGRESS", "In progress"],
-  ["BLOCKED", "Blocked"], ["DONE", "Complete"], ["CANCELED", "Canceled"]
-] as const;
-const classificationOrder = ["Feature", "UI / UX", "Security", "MCP", "Bug", "Subagent", "Task"];
-const dateFormatter = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", year: "numeric", month: "numeric", day: "numeric" });
-const dateTimeFormatter = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", year: "numeric", month: "numeric", day: "numeric", hour: "numeric", minute: "2-digit", second: "2-digit" });
-const numberFormatter = new Intl.NumberFormat("en-US");
-
-function classification(task: Task) {
-  return task.tags[0]?.tag.name ?? "Untagged";
-}
-
-function statusLabel(status: string) {
-  return stages.find(([value]) => value === status)?.[1] ?? status;
-}
-
-function groupValue(task: Task, key: GroupKey) {
-  if (key === "status") return statusLabel(task.status);
-  if (key === "classification") return classification(task);
-  if (key === "project") return task.project?.key ?? "Unsorted";
-  return "All work";
-}
-
-function taskProgress(task: Task) {
-  if (task.archivedAt) return "Archived";
-  if (task.approvedAt) return "Approved";
-  if (task.status === "DONE") return "Awaiting approval";
-  if (task.status === "BLOCKED") return "Needs a decision";
-  if (task.status === "IN_PROGRESS") return "Work is moving";
-  return task.activities.length ? `${task.activities.length} logged changes` : "Newly captured";
-}
-
-function plainTaskPreview(description: string | null) {
-  if (!description) return "Open this card to review the work and define the outcome.";
-  return description
-    .replace(/^#{1,6}\s+/gm, "")
-    .replace(/\[(.*?)\]\((.*?)\)/g, "$1")
-    .replace(/[*_~`>|]/g, "")
-    .replace(/^\s*[-+]\s+/gm, "")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function promoteLooseHeadings(description: string) {
-  const lines = description.replace(/\r\n?/g, "\n").trim().split("\n");
-  return lines.map((line, index) => {
-    const trimmed = line.trim();
-    if (!trimmed || /^#{1,6}\s/.test(trimmed) || /^([-+*]|\d+[.)])\s/.test(trimmed)) return line;
-    const previousIsBlank = index === 0 || !lines[index - 1].trim();
-    const nextIsBlank = index < lines.length - 1 && !lines[index + 1].trim();
-    const nextContent = lines.slice(index + 1).find((candidate) => candidate.trim());
-    const title = trimmed.replace(/:$/, "");
-    const looksLikeHeading = previousIsBlank && nextIsBlank && Boolean(nextContent) &&
-      title.length <= 80 && title.split(/\s+/).length <= 10 && !/[.!?;]$/.test(title);
-    return looksLikeHeading ? `## ${title}` : line;
-  }).join("\n");
-}
-
-function slugifyHeading(value: string) {
-  return value.toLowerCase().replace(/[`*_~[\]()]/g, "").replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "section";
-}
-
-function structureDescription(description: string) {
-  const markdown = promoteLooseHeadings(description);
-  const intro: string[] = [];
-  const sections: DescriptionSection[] = [];
-  const usedIds = new Map<string, number>();
-  let current: DescriptionSection | null = null;
-
-  for (const line of markdown.split("\n")) {
-    const heading = /^(#{1,4})\s+(.+?)\s*#*$/.exec(line.trim());
-    if (!heading) {
-      if (current) current.body = `${current.body}${current.body ? "\n" : ""}${line}`;
-      else intro.push(line);
-      continue;
-    }
-    const title = heading[2].replace(/[*_~`]/g, "").trim();
-    const baseId = `task-section-${slugifyHeading(title)}`;
-    const occurrence = usedIds.get(baseId) ?? 0;
-    usedIds.set(baseId, occurrence + 1);
-    current = { id: occurrence ? `${baseId}-${occurrence + 1}` : baseId, title, level: heading[1].length, body: "" };
-    sections.push(current);
-  }
-
-  return { intro: intro.join("\n").trim(), sections: sections.map((section) => ({ ...section, body: section.body.trim() })) };
-}
-
-function safeMarkdownUrl(url: string) {
-  if (url.startsWith("#")) return url;
-  try {
-    const parsed = new URL(url);
-    return ["http:", "https:", "mailto:"].includes(parsed.protocol) ? url : "";
-  } catch {
-    return "";
-  }
-}
-
-const markdownComponents: Components = {
-  a: ({ href, children }) => {
-    const safeHref = href ? safeMarkdownUrl(href) : "";
-    if (!safeHref) return <span>{children}</span>;
-    const opensNewTab = /^https?:/i.test(safeHref);
-    return <a href={safeHref} target={opensNewTab ? "_blank" : undefined} rel={opensNewTab ? "noopener noreferrer" : undefined}>{children}</a>;
-  }
-};
-
-function TaskDescription({ description }: { description: string | null }) {
-  const structured = useMemo(() => description ? structureDescription(description) : null, [description]);
-  if (!description || !structured) return <p className="detailDescription detailEmpty">No details have been added yet.</p>;
-  const showOutline = description.length > 500 && structured.sections.length > 1;
-  const renderMarkdown = (value: string) => <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents} skipHtml urlTransform={safeMarkdownUrl}>{value}</ReactMarkdown>;
-
-  return <div className="detailDescription taskMarkdown" data-testid="task-description">
-    {showOutline && <details className="detailOutline" open>
-      <summary>On this task <span>{structured.sections.length} sections</span></summary>
-      <ol>{structured.sections.map((section) => <li className={`level-${section.level}`} key={section.id}><a href={`#${section.id}`} onClick={(event) => { event.preventDefault(); document.getElementById(section.id)?.scrollIntoView({ behavior: "smooth", block: "start" }); }}>{section.title}</a></li>)}</ol>
-    </details>}
-    {structured.intro && <div className="markdownIntro">{renderMarkdown(structured.intro)}</div>}
-    {structured.sections.map((section) => <section className={`markdownSection level-${section.level}`} id={section.id} key={section.id}>
-      {section.level <= 2 ? <h3>{section.title}</h3> : <h4>{section.title}</h4>}
-      {section.body && renderMarkdown(section.body)}
-    </section>)}
-  </div>;
-}
+import { ActivitySection } from "./activity-section";
+import { ManageSection } from "./manage-section";
+import { TaskCard } from "./task-card";
+import { TaskDialog } from "./task-dialog";
+import { classificationOrder, groupValue, stages, type DialogMode, type GroupKey, type Task, type WorkspaceActivity, type WorkspaceData } from "./workspace-view";
 
 export default function Workspace({ initialWorkspace }: { initialWorkspace: WorkspaceData }) {
   const [tasks, setTasks] = useState(initialWorkspace.tasks);
@@ -182,7 +34,6 @@ export default function Workspace({ initialWorkspace }: { initialWorkspace: Work
   const [primaryGroup, setPrimaryGroup] = useState<GroupKey>("status");
   const [secondaryGroup, setSecondaryGroup] = useState<GroupKey>("project");
   const [sort, setSort] = useState("UPDATED");
-  const dialogRef = useRef<HTMLDivElement>(null);
   const returnFocusRef = useRef<HTMLElement | null>(null);
   const dialogOpen = creating || Boolean(selected);
 
@@ -213,48 +64,6 @@ export default function Workspace({ initialWorkspace }: { initialWorkspace: Work
     setDialogMode("edit");
     setCreating(true);
   }
-
-  useEffect(() => {
-    if (!dialogOpen) return;
-
-    const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    const frame = window.requestAnimationFrame(() => {
-      const initialFocus = creating || dialogMode === "edit"
-        ? dialogRef.current?.querySelector<HTMLElement>("[data-dialog-initial-focus]")
-        : dialogRef.current?.querySelector<HTMLElement>("[data-detail-initial-focus]");
-      initialFocus?.focus();
-    });
-
-    function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        closeDialog();
-        return;
-      }
-      if (event.key !== "Tab" || !dialogRef.current) return;
-      const focusable = [...dialogRef.current.querySelectorAll<HTMLElement>(
-        'a[href], button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])'
-      )].filter((element) => element.offsetParent !== null);
-      if (!focusable.length) return;
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    }
-
-    document.addEventListener("keydown", handleKeyDown);
-    return () => {
-      window.cancelAnimationFrame(frame);
-      document.removeEventListener("keydown", handleKeyDown);
-      document.body.style.overflow = previousOverflow;
-    };
-  }, [closeDialog, creating, dialogMode, dialogOpen]);
 
   const sourceTasks = showArchive ? archived : tasks;
   const activeProjects = projects.filter((project) => !project.archivedAt);
@@ -476,19 +285,6 @@ export default function Workspace({ initialWorkspace }: { initialWorkspace: Work
     await fetchActivity();
   }
 
-  const renderCard = (task: Task) => {
-    const lastEvent = task.activities[0];
-    return <article className="galleryCard" key={task.id}>
-      <button className="cardOpen" onClick={(event) => openDetails(task, event.currentTarget)} aria-label={`View details for ${task.title}`}>
-        <div className="cardTop"><div className="titleTags">{task.tags.length ? task.tags.map(({ tag }) => <span className="typeBadge" style={{ "--tag": tag.color ?? "#718266" } as React.CSSProperties} key={tag.id}>{tag.name}</span>) : <span className="typeBadge">Untagged</span>}</div><span className="cardStatus">{statusLabel(task.status)}</span></div>
-        <h3>{task.title}</h3>
-        <p>{plainTaskPreview(task.description)}</p>
-        <div className="progressSignal"><i className={task.status.toLowerCase()} /><span>{taskProgress(task)}</span><b>v{task.version}</b></div>
-      </button>
-      <footer className="cardFooter"><span className="projectPill" style={{ "--project": task.project ? projects.find((project) => project.id === task.project!.id)?.color ?? "#c5f779" : "#768075" } as React.CSSProperties}>{task.project?.key ?? "UNSORTED"}</span><span>{lastEvent ? `${lastEvent.actorType === "AI_TOOL" ? "AI" : "Human"} · ${dateFormatter.format(new Date(lastEvent.createdAt))}` : task.createdBy ?? "Local"}</span>{!task.archivedAt && <button className="cardEdit" onClick={(event) => { event.stopPropagation(); openEditor(task, event.currentTarget); }} aria-label={`Edit ${task.title}`}>Edit</button>}</footer>
-    </article>;
-  };
-
   return <main className="galleryShell">
     <header className="appHeader">
       <div className="brand"><span className="brandMark">S</span><div><strong>Spore Locker</strong><small>shared local work</small></div></div>
@@ -532,7 +328,7 @@ export default function Workspace({ initialWorkspace }: { initialWorkspace: Work
             <div className="groupHeading"><h2>{first}</h2><span>{[...nested.values()].flat().length}</span></div>
             {[...nested.entries()].map(([second, groupTasks]) => <div className="subgroup" key={second}>
               {second !== "All" && <h3>{second}<span>{groupTasks.length}</span></h3>}
-              <div className="cardGrid">{groupTasks.map(renderCard)}</div>
+              <div className="cardGrid">{groupTasks.map((task) => <TaskCard key={task.id} task={task} projects={projects} onOpen={openDetails} onEdit={openEditor} />)}</div>
             </div>)}
           </section>)}
       </section>
@@ -551,158 +347,16 @@ export default function Workspace({ initialWorkspace }: { initialWorkspace: Work
 
     {section === "journal" && <Journal workspaceId={initialWorkspace.id} projects={projects} />}
 
-    {section === "manage" && <section className="managementPage">
-      <div className="pageIntro"><p className="eyebrow">WORKSPACE STRUCTURE</p><h1>Projects and tags</h1><p>Projects organize work; tags describe it. Archiving hides a filter without breaking task history.</p></div>
-      <div className="managerGrid">
-        <section className="managerPanel">
-          <div className="managerHead"><div><h2>Projects</h2><p>Delete is available only when no tasks reference the project.</p></div><span>{activeProjects.length} active</span></div>
-          <form className="quickCreate" onSubmit={(event) => {
-            event.preventDefault(); const form = new FormData(event.currentTarget);
-            void mutate(`/api/workspaces/${initialWorkspace.id}/projects`, "POST", { key: form.get("key"), name: form.get("name"), color: form.get("color") });
-          }}>
-            <input name="key" required maxLength={12} placeholder="KEY" />
-            <input name="name" required maxLength={100} placeholder="Project name" />
-            <input name="color" type="color" defaultValue="#c5f779" aria-label="Project color" />
-            <button disabled={busy}>Add project</button>
-          </form>
-          <div className="managerList">{projects.map((project) => <form className={`managerItem ${project.archivedAt ? "archived" : ""}`} key={project.id} onSubmit={(event) => {
-            event.preventDefault(); const form = new FormData(event.currentTarget);
-            void mutate(`/api/projects/${project.id}`, "PATCH", { key: form.get("key"), name: form.get("name"), color: form.get("color") });
-          }}>
-            <input name="key" defaultValue={project.key} maxLength={12} required />
-            <input name="name" defaultValue={project.name} maxLength={100} required />
-            <input name="color" type="color" defaultValue={project.color ?? "#768075"} aria-label={`${project.name} color`} />
-            <span className="managerState">{project.archivedAt ? "Archived" : "Active"}</span>
-            <button disabled={busy}>Save</button>
-            {!project.archivedAt && <button type="button" className="quietDanger" disabled={busy} onClick={() => void mutate(`/api/projects/${project.id}`, "POST", { action: "archive" })}>Archive</button>}
-            {project.archivedAt && <button type="button" className="restoreAction" disabled={busy} onClick={() => void mutate(`/api/projects/${project.id}`, "POST", { action: "restore" })}>Restore</button>}
-            <button type="button" className="quietDanger" disabled={busy} onClick={() => void mutate(`/api/projects/${project.id}`, "POST", { action: "delete" })}>Delete empty</button>
-          </form>)}</div>
-        </section>
+    {section === "manage" && <ManageSection workspaceId={initialWorkspace.id} projects={projects} tags={tags} busy={busy} onMutate={mutate} />}
 
-        <section className="managerPanel">
-          <div className="managerHead"><div><h2>Tags</h2><p>Task labels are explicit, reusable, and support multiple values.</p></div><span>{tags.length} active</span></div>
-          <form className="quickCreate tagCreate" onSubmit={(event) => {
-            event.preventDefault(); const form = new FormData(event.currentTarget);
-            void mutate(`/api/workspaces/${initialWorkspace.id}/tags`, "POST", { name: form.get("name"), color: form.get("color") });
-          }}>
-            <input name="name" required maxLength={40} placeholder="Tag name" />
-            <input name="color" type="color" defaultValue="#8ec6ff" aria-label="Tag color" />
-            <button disabled={busy}>Add tag</button>
-          </form>
-          <div className="managerList">{tags.map((tag) => <form className="managerItem tagItem" key={tag.id} onSubmit={(event) => {
-            event.preventDefault(); const form = new FormData(event.currentTarget);
-            void mutate(`/api/tags/${tag.id}`, "PATCH", { name: form.get("name"), color: form.get("color") });
-          }}>
-            <input name="name" defaultValue={tag.name} maxLength={40} required />
-            <input name="color" type="color" defaultValue={tag.color ?? "#718266"} aria-label={`${tag.name} color`} />
-            <button disabled={busy}>Save</button>
-            <button type="button" className="quietDanger" disabled={busy} onClick={() => void mutate(`/api/tags/${tag.id}`, "POST", { action: "archive" })}>Archive</button>
-          </form>)}</div>
-        </section>
-      </div>
-    </section>}
+    {section === "activity" && <ActivitySection events={activityLog} query={query} />}
 
-    {section === "activity" && <section className="activityPage">
-      <div className="pageIntro"><p className="eyebrow">IMMUTABLE AUDIT</p><h1>Everything that changed.</h1><p>{activityLog.length} events match the current filters. Lifecycle records remain append-only even when an empty project filter is removed.</p></div>
-      <div className="activityTable" role="table">
-        <div className="activityHeader" role="row"><span>When</span><span>Actor</span><span>Action</span><span>Target</span><span>Summary</span></div>
-        {activityLog.filter((event) => !query || `${event.summary} ${event.task?.title ?? ""} ${event.project?.name ?? ""} ${event.tag?.name ?? ""}`.toLowerCase().includes(query.toLowerCase())).map((event) => <article className="activityRow" role="row" key={event.id}>
-          <time>{dateTimeFormatter.format(new Date(event.createdAt))}</time>
-          <span><b>{event.actorLabel}</b><small>{event.actorType.replace("_", " ")}</small></span>
-          <code>{event.action}</code>
-          <span>{event.task?.title ?? event.journalContribution?.authorLabel ?? event.journalCandidate?.summary ?? event.journalEntry?.title ?? event.project?.name ?? event.tag?.name ?? event.artifact?.title ?? "Workspace"}</span>
-          <p>{event.summary}</p>
-        </article>)}
-        {!activityLog.length && <div className="emptyPanel">No activity matches these filters.</div>}
-      </div>
-    </section>}
-
-    {dialogOpen && <div className="modalBackdrop" onMouseDown={closeDialog}>
-      <div ref={dialogRef} className={`modal ${selected && dialogMode === "detail" ? "detailModal" : ""}`} role="dialog" aria-modal="true" aria-labelledby="task-dialog-title" onMouseDown={(event) => event.stopPropagation()}>
-        <div className="modalHead"><div><p className="eyebrow">{creating ? "CAPTURE" : `${classification(selected!)} · VERSION ${selected?.version}`}</p><h2 id="task-dialog-title">{creating ? "Save the thought" : dialogMode === "detail" ? selected?.title : "Edit task"}</h2></div><div className="modalHeadActions">{selected && dialogMode === "detail" && !selected.archivedAt && <button type="button" className="headerEdit" onClick={() => setDialogMode("edit")} aria-label={`Edit ${selected.title}`}>Edit</button>}<button type="button" className="close" data-detail-initial-focus={dialogMode === "detail" ? "true" : undefined} onClick={closeDialog} aria-label="Close task dialog">×</button></div></div>
-
-        {selected && dialogMode === "detail" && <>
-          <section className="detailContent">
-            <div className="detailSummary">
-              <div className="detailTags">{selected.tags.length ? selected.tags.map(({ tag }) => <span className="typeBadge" style={{ "--tag": tag.color ?? "#718266" } as React.CSSProperties} key={tag.id}>{tag.name}</span>) : <span className="typeBadge">Untagged</span>}</div>
-              <span className="detailStatus"><i className={selected.status.toLowerCase()} />{statusLabel(selected.status)}</span>
-            </div>
-            <TaskDescription description={selected.description} />
-            <dl className="detailMeta">
-              <div><dt>Project</dt><dd>{selected.project ? `${selected.project.key} · ${selected.project.name}` : "Unsorted"}</dd></div>
-              <div><dt>Priority</dt><dd>{selected.priority.toLowerCase()}</dd></div>
-              <div><dt>Progress</dt><dd>{taskProgress(selected)}</dd></div>
-              <div><dt>Updated</dt><dd>{dateTimeFormatter.format(new Date(selected.updatedAt))}</dd></div>
-              <div><dt>Created</dt><dd>{dateTimeFormatter.format(new Date(selected.createdAt))}</dd></div>
-              {selected.approvedAt && <div><dt>Approved</dt><dd>{dateTimeFormatter.format(new Date(selected.approvedAt))}{selected.approvedBy ? ` by ${selected.approvedBy}` : ""}</dd></div>}
-              {selected.archivedAt && <div><dt>Archived</dt><dd>{dateTimeFormatter.format(new Date(selected.archivedAt))}</dd></div>}
-            </dl>
-
-            <section className="detailSection">
-              <div className="artifactHead"><div><h3>Attached context</h3><p>References and durable notes connected to this task.</p></div><span>{selected.artifacts.length}</span></div>
-              {selected.artifacts.length ? <div className="artifactList detailArtifactList">{selected.artifacts.map((artifact) => <article key={artifact.id}>
-                <span className="artifactKind">{artifact.kind.replace("_", " ")}</span>
-                <div><strong>{artifact.title}</strong>
-                  {artifact.url && <a href={artifact.url} target="_blank" rel="noopener noreferrer">{artifact.url}</a>}
-                  {artifact.kind === "TEXT" && <p>{artifact.textContent}</p>}
-                  {artifact.kind === "FILE_METADATA" && <small>{artifact.fileName} · {artifact.mimeType} · {artifact.sizeBytes == null ? "Unknown size" : `${numberFormatter.format(artifact.sizeBytes)} bytes`}</small>}
-                </div>
-              </article>)}</div> : <p className="artifactEmpty">No context is attached.</p>}
-            </section>
-
-            <section className="detailSection taskHistory"><h3>Immutable task history</h3>{selected.activities.length ? selected.activities.map((event) => <p key={event.id}><strong>{event.actorLabel}</strong> · {event.summary}<small>{dateTimeFormatter.format(new Date(event.createdAt))}</small></p>) : <p className="artifactEmpty">No activity has been logged yet.</p>}</section>
-          </section>
-          {(selected.archivedAt || (selected.status === "DONE" && !selected.approvedAt) || selected.approvedAt) && <div className="detailActions">
-            {selected.archivedAt && <button type="button" className="approve" disabled={busy} onClick={() => lifecycle(selected, "restore")}>Restore to active</button>}
-            {selected.status === "DONE" && !selected.approvedAt && !selected.archivedAt && <button type="button" className="approve" disabled={busy} onClick={() => lifecycle(selected, "approve")}>Approve complete</button>}
-            {selected.approvedAt && !selected.archivedAt && <button type="button" className="archive" disabled={busy} onClick={() => lifecycle(selected, "archive")}>Archive approved task</button>}
-          </div>}
-        </>}
-
-        {(creating || dialogMode === "edit") && <>
-          <form onSubmit={creating ? createTask : saveTask}>
-            <label>Title<input name="title" required maxLength={200} defaultValue={selected?.title} data-dialog-initial-focus /></label>
-            <label>Details <span className="fieldHint">Markdown supported</span><textarea name="description" maxLength={20000} rows={6} defaultValue={selected?.description ?? ""} placeholder="Use headings, lists, links, tables, or checkboxes to structure the work…" /></label>
-            <div className="formRow"><label>Project<select name="projectId" defaultValue={creating ? activeProjects[0]?.id ?? "" : selected?.project?.id ?? ""}><option value="">Unsorted</option>{activeProjects.map((project) => <option key={project.id} value={project.id}>{project.key} · {project.name}</option>)}{selected?.project && !activeProjects.some((project) => project.id === selected.project!.id) && <option value={selected.project.id}>{selected.project.key} · archived project</option>}</select></label>
-            <label>Priority<select name="priority" defaultValue={selected?.priority ?? "MEDIUM"}><option>LOW</option><option>MEDIUM</option><option>HIGH</option><option>URGENT</option></select></label></div>
-            <fieldset className="tagPicker"><legend>Tags</legend><div>{tags.map((tag) => <label key={tag.id} style={{ "--tag": tag.color ?? "#718266" } as React.CSSProperties}><input type="checkbox" name="tagIds" value={tag.id} defaultChecked={selected?.tags.some(({ tag: current }) => current.id === tag.id)} /><span>{tag.name}</span></label>)}</div></fieldset>
-            {selected && <label>Stage<select name="status" defaultValue={selected.status}>{stages.map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label>}
-            <div className="modalActions">
-              {selected?.archivedAt && <button type="button" className="approve" disabled={busy} onClick={() => lifecycle(selected, "restore")}>Restore to active</button>}
-              {selected?.status === "DONE" && !selected.approvedAt && !selected.archivedAt && <button type="button" className="approve" disabled={busy} onClick={() => lifecycle(selected, "approve")}>Approve complete</button>}
-              {selected?.approvedAt && !selected.archivedAt && <button type="button" className="archive" disabled={busy} onClick={() => lifecycle(selected, "archive")}>Archive approved task</button>}
-              {!selected?.archivedAt && <button className="primary" disabled={busy}>{busy ? "Saving…" : creating ? "Capture item" : "Save changes"}</button>}
-            </div>
-          </form>
-          {selected && <section className="artifactPanel">
-            <div className="artifactHead"><div><h3>Attached context</h3><p>Safe web links, notes, and metadata-only file references.</p></div><span>{selected.artifacts.length}</span></div>
-            <div className="artifactSection"><h4>Links</h4><div className="artifactList">{selected.artifacts.filter((artifact) => artifact.kind === "LINK").map((artifact) => <article key={artifact.id}>
-              <span className="artifactKind">LINK</span>
-              <div><strong>{artifact.title}</strong>{artifact.url && <a href={artifact.url} target="_blank" rel="noopener noreferrer">{artifact.url}</a>}</div>
-              <button type="button" onClick={() => void removeArtifact(artifact.id)} disabled={busy}>Remove</button>
-            </article>)}{!selected.artifacts.some((artifact) => artifact.kind === "LINK") && <p className="artifactEmpty">No links attached.</p>}</div></div>
-            <div className="artifactSection"><h4>Notes and file references</h4><div className="artifactList">{selected.artifacts.filter((artifact) => artifact.kind !== "LINK").map((artifact) => <article key={artifact.id}>
-              <span className="artifactKind">{artifact.kind.replace("_", " ")}</span>
-              <div><strong>{artifact.title}</strong>
-                {artifact.kind === "TEXT" && <p>{artifact.textContent}</p>}
-                {artifact.kind === "FILE_METADATA" && <small>{artifact.fileName} · {artifact.mimeType} · {artifact.sizeBytes == null ? "Unknown size" : `${numberFormatter.format(artifact.sizeBytes)} bytes`}</small>}
-              </div>
-              <button type="button" onClick={() => void removeArtifact(artifact.id)} disabled={busy}>Remove</button>
-            </article>)}</div></div>
-            {!selected.archivedAt && <form className="artifactForm" onSubmit={addArtifact}>
-              <div className="formRow"><label>Context type<select name="kind" defaultValue="LINK"><option value="LINK">External link</option><option value="TEXT">Text / Markdown</option><option value="FILE_METADATA">File metadata</option></select></label><label>Title<input name="artifactTitle" required maxLength={200} placeholder="Design sketch, API notes…" /></label></div>
-              <label>Safe external URL<input name="url" type="url" placeholder="https://excalidraw.com/…" /></label>
-              <label>Text / Markdown<textarea name="textContent" maxLength={100000} rows={4} placeholder="Paste durable context or Markdown here." /></label>
-              <div className="formRow"><label>File name<input name="fileName" maxLength={255} placeholder="specification.pdf" /></label><label>MIME type<select name="mimeType" defaultValue="application/pdf"><option>application/pdf</option><option>text/plain</option><option>text/markdown</option><option>image/png</option><option>image/jpeg</option><option>image/webp</option></select></label></div>
-              <label>File size in bytes<input name="sizeBytes" type="number" min="1" max="26214400" placeholder="Metadata only; no binary is uploaded" /></label>
-              <button className="secondaryAction" disabled={busy}>Attach context</button>
-            </form>}
-            <p className="policyNote">Binary upload is not enabled yet. File entries validate allowed type and a 25 MiB ceiling, but store metadata only—never arbitrary local paths or raw database blobs.</p>
-          </section>}
-          {selected && <div className="taskHistory"><h3>Immutable task history</h3>{selected.activities.map((event) => <p key={event.id}><strong>{event.actorLabel}</strong> · {event.summary}<small>{dateTimeFormatter.format(new Date(event.createdAt))}</small></p>)}</div>}
-        </>}
-      </div>
-    </div>}
+    {dialogOpen && <TaskDialog
+      selected={selected} creating={creating} dialogMode={dialogMode} busy={busy}
+      projects={activeProjects} tags={tags}
+      onClose={closeDialog} onChangeMode={setDialogMode}
+      onCreate={createTask} onSave={saveTask} onLifecycle={lifecycle}
+      onAddArtifact={addArtifact} onRemoveArtifact={removeArtifact}
+    />}
   </main>;
 }
