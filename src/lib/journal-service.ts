@@ -1,5 +1,6 @@
 import { Prisma, type JournalCandidateKind, type JournalRole } from "@prisma/client";
 import { db } from "@/lib/db";
+import { ExpectedError } from "@/lib/expected-error";
 import type { TaskActor } from "@/lib/task-service";
 
 const entryInclude = {
@@ -37,10 +38,10 @@ export type JournalSearchResult = {
 };
 
 export function parseJournalDate(value: string) {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) throw new Error("Journal date must use YYYY-MM-DD");
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) throw new ExpectedError("Journal date must use YYYY-MM-DD");
   const date = new Date(`${value}T00:00:00.000Z`);
   if (Number.isNaN(date.getTime()) || date.toISOString().slice(0, 10) !== value) {
-    throw new Error("Journal date is invalid");
+    throw new ExpectedError("Journal date is invalid");
   }
   return date;
 }
@@ -67,7 +68,7 @@ async function validateProjects(tx: Prisma.TransactionClient, workspaceId: strin
   const uniqueIds = [...new Set(projectIds)];
   if (!uniqueIds.length) return uniqueIds;
   const count = await tx.project.count({ where: { workspaceId, id: { in: uniqueIds } } });
-  if (count !== uniqueIds.length) throw new Error("Journal projects must belong to the same workspace");
+  if (count !== uniqueIds.length) throw new ExpectedError("Journal projects must belong to the same workspace");
   return uniqueIds;
 }
 
@@ -97,22 +98,22 @@ export async function upsertJournalContribution(
   actor: TaskActor
 ) {
   if (input.role === "USER_DECISION" && actor.type !== "USER") {
-    throw new Error("USER_DECISION contributions record the human's voice and can only be written by the user");
+    throw new ExpectedError("USER_DECISION contributions record the human's voice and can only be written by the user");
   }
   const entryDate = parseJournalDate(input.date);
   return db.$transaction(async (tx) => {
     const entry = await ensureEntry(tx, input.workspaceId, entryDate);
-    if (entry.status === "FINALIZED") throw new Error("Finalized Journal entries cannot be changed");
+    if (entry.status === "FINALIZED") throw new ExpectedError("Finalized Journal entries cannot be changed");
     const projectIds = await validateProjects(tx, input.workspaceId, input.projectIds ?? []);
     const topics = [...new Set((input.topics ?? []).map((item) => item.trim()).filter(Boolean))];
     const existing = await tx.journalContribution.findUnique({
       where: { entryId_authorKey: { entryId: entry.id, authorKey: input.authorKey } }
     });
     if (existing && input.version !== existing.version) {
-      throw new Error("Journal contribution changed since it was loaded");
+      throw new ExpectedError("Journal contribution changed since it was loaded");
     }
     if (!existing && input.version !== undefined) {
-      throw new Error("Journal contribution does not exist at that version");
+      throw new ExpectedError("Journal contribution does not exist at that version");
     }
 
     const common = {
@@ -131,7 +132,7 @@ export async function upsertJournalContribution(
         where: { id: existing.id, version: existing.version },
         data: { ...common, version: { increment: 1 } }
       });
-      if (updated.count !== 1) throw new Error("Journal contribution changed since it was loaded");
+      if (updated.count !== 1) throw new ExpectedError("Journal contribution changed since it was loaded");
     }
     const contribution = existing
       ? await tx.journalContribution.findUniqueOrThrow({ where: { id: existing.id } })
@@ -167,7 +168,7 @@ export async function upsertJournalContribution(
         data: { consumedAt: new Date() }
       });
       if (updated.count !== candidateIds.length) {
-        throw new Error("Journal candidates must be unused events from the same day");
+        throw new ExpectedError("Journal candidates must be unused events from the same day");
       }
     }
     const updatedEntry = await tx.journalEntry.update({
@@ -216,7 +217,7 @@ export async function flagJournalCandidate(
   const entryDate = parseJournalDate(input.date);
   return db.$transaction(async (tx) => {
     const entry = await ensureEntry(tx, input.workspaceId, entryDate);
-    if (entry.status === "FINALIZED") throw new Error("Finalized Journal entries cannot be changed");
+    if (entry.status === "FINALIZED") throw new ExpectedError("Finalized Journal entries cannot be changed");
     if (input.projectId) await validateProjects(tx, input.workspaceId, [input.projectId]);
     const candidate = await tx.journalCandidate.create({
       data: {
@@ -260,7 +261,7 @@ export async function flagJournalCandidate(
 export async function finalizeJournalEntry(id: string, version: number, actor: TaskActor) {
   return db.$transaction(async (tx) => {
     const current = await tx.journalEntry.findUniqueOrThrow({ where: { id } });
-    if (current.status === "FINALIZED") throw new Error("Journal entry is already finalized");
+    if (current.status === "FINALIZED") throw new ExpectedError("Journal entry is already finalized");
     const updated = await tx.journalEntry.updateMany({
       where: { id, version, status: "OPEN" },
       data: {
@@ -270,7 +271,7 @@ export async function finalizeJournalEntry(id: string, version: number, actor: T
         version: { increment: 1 }
       }
     });
-    if (updated.count !== 1) throw new Error("Journal entry changed since it was loaded");
+    if (updated.count !== 1) throw new ExpectedError("Journal entry changed since it was loaded");
     const entry = await tx.journalEntry.findUniqueOrThrow({ where: { id } });
     await tx.activity.create({
       data: {
