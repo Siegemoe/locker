@@ -36,7 +36,7 @@
     "@modelcontextprotocol/ext-apps": "^1.7.5",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "@prisma/client": "^6.19.0",
-    "next": "^16.3.2",
+    "next": "^16.3.5",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-markdown": "^10.1.0",
@@ -48,7 +48,7 @@
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.4",
     "eslint": "^9.0.0",
-    "eslint-config-next": "^16.3.2",
+    "eslint-config-next": "^16.3.5",
     "prisma": "^6.19.0",
     "tsx": "^4.23.12",
     "typescript": "^5.9.0"
